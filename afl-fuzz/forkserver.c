@@ -282,23 +282,30 @@ void get_coverage_info(u32 *visited_bbs_out, u32 *total_bbs_out) {
 	*total_bbs_out = total_bbs;
 }
 
+DWORD GetMainThreadId(DWORD pid) {
+	auto snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	THREADENTRY32 tEntry;
+	tEntry.dwSize = sizeof(THREADENTRY32);
+	DWORD result = 0;
+	DWORD currentPID = pid;
+	for (BOOL success = Thread32First(snap, &tEntry);
+		!result && success && GetLastError() != ERROR_NO_MORE_FILES;
+		success = Thread32Next(snap, &tEntry))
+	{
+		if (tEntry.th32OwnerProcessID == currentPID) {
+			result = tEntry.th32ThreadID;
+		}
+	}
+	CloseHandle(snap);
+	return result;
+}
+
 // starts the forkserver process
 static void start_process(char *cmd) {	
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
     HANDLE hJob = NULL;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
-
-	if (options.debug_mode) {	
-		ACTF("Debug mode enabled\n");
-	}
-
-	ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
-
+	ACTF("Attach mode enabled, ver 1.2\n");
     BOOL inherit_handles = FALSE;
-
 	hJob = CreateJobObject(NULL, NULL);
     if (hJob == NULL) {
         FATAL("CreateJobObject failed, GLE=%d.\n", GetLastError());
@@ -324,30 +331,47 @@ static void start_process(char *cmd) {
 	if (!forkserver_same_console) {
 		dwFlags |= CREATE_NEW_CONSOLE;
 	} else {
-		ACTF("Will use same console for AFL and forkserver.\n");
+		ACTF("Will use same console for AFL and forkserver.");
+		ACTF("This is not supported via attach mode!");
 	}
-	debug_printf("  cmd: %s\n", cmd);
 
-	// In debug mode, sinkholing stds will cause SetStdHandle in ReopenStdioHandles in the forklib to fail and silently exit the child process(??) So don't do that.
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, inherit_handles, dwFlags, NULL, NULL, &si, &pi)) {
-        FATAL("CreateProcess failed, GLE=%d.\n", GetLastError());
-    }
-
-    child_handle = pi.hProcess;
-	// pi.hThread doesn't seem to have THREAD_ALL_ACCESS (SetThreadContext fails), so Fuck that just open the thread manually.
-	child_thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, GetThreadId(pi.hThread));
+	ACTF("Please start the target manaully. cmd: %s", cmd);
+	ACTF("Please input your target pid. pid: ");
+	DWORD pid = 3556;
+	ACTF("Pid received.");
+	child_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
+	if (child_handle == INVALID_HANDLE_VALUE)
+	{
+		dank_perror("Attach mode: OpenProcess");
+	}
+	ACTF("Attach mode: before get main thread.");
+	child_thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, GetMainThreadId(pid));
+	ACTF("Attach mode: main thread ok.");
 	if (child_thread_handle == INVALID_HANDLE_VALUE)
 	{
-		dank_perror("OpenThread");
+		dank_perror("Attach mode: OpenThread");
 	}
-	CloseHandle(pi.hThread);
-
+	if (-1 == SuspendThread(child_thread_handle))
+	{
+		dank_perror("Attach mode: SuspendThread");
+	}
+	CONTEXT c;
+	c.ContextFlags = CONTEXT_CONTROL;
+	if (!GetThreadContext(child_thread_handle, &c))
+	{
+		dank_perror("Attach mode: GetThreadContext");
+	}
+	SIZE_T writtenBytes = 0;
+	if (!WriteProcessMemory(child_handle, c.Rip, "\xe9\xbe", 2, &writtenBytes))
+	{
+		dank_perror("Attach mode: WriteProcessMemory");
+	}
     child_entrypoint_reached = false;
-
     if (!AssignProcessToJobObject(hJob, child_handle)) {
         FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
     }
 	CloseHandle(hJob);
+	ACTF("Attach mode: step 1 complete.");
 }
 
 void kill_process() {
@@ -401,6 +425,42 @@ int get_child_result()
 	// !!!! The child is now waiting on YOU to kill it! Remember to kill it!
 }
 
+UINT64 GetProcessBaseAddress(HANDLE processHandle)
+{
+	UINT64   baseAddress = 0;
+	HMODULE* moduleArray;
+	LPBYTE      moduleArrayBytes;
+	DWORD       bytesRequired;
+
+	if (processHandle)
+	{
+		if (EnumProcessModules(processHandle, NULL, 0, &bytesRequired))
+		{
+			if (bytesRequired)
+			{
+				moduleArrayBytes = (LPBYTE)LocalAlloc(LPTR, bytesRequired);
+
+				if (moduleArrayBytes)
+				{
+					unsigned int moduleCount;
+
+					moduleCount = bytesRequired / sizeof(HMODULE);
+					moduleArray = (HMODULE*)moduleArrayBytes;
+
+					if (EnumProcessModules(processHandle, moduleArray, bytesRequired, &bytesRequired))
+					{
+						baseAddress = moduleArray[0];
+					}
+
+					LocalFree(moduleArrayBytes);
+				}
+			}
+		}
+	}
+
+	return baseAddress;
+}
+
 CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, uint32_t timeout, uint32_t init_timeout)
 {
 	//ACTF("Injecting DLL!");
@@ -409,27 +469,18 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	//trace_printf("spwned child\n");
 	// Derive entrypoint address from PEB and PE header
 	CONTEXT context;
-	context.ContextFlags = CONTEXT_INTEGER;
-	GetThreadContext(child_thread_handle, &context);
-	uintptr_t pebAddr;
-#ifdef _WIN64
-	pebAddr = context.Rdx;
-	ReadProcessMemory(child_handle, (PVOID)(pebAddr + 0x10), &base_address, sizeof(base_address), NULL);
-#else
-	pebAddr = context.Ebx;
-	ReadProcessMemory(child_handle, (PVOID)(pebAddr + 8), &base_address, sizeof(base_address), NULL);
-#endif
-	debug_printf("  PEB=0x%p, Base address=0x%p\n", pebAddr, base_address);
+	HMODULE base_address = GetProcessBaseAddress(child_handle);
+	ACTF("  Base address=0x%p", base_address);
 
 	uintptr_t oep = get_entry_point(binary_name);
-	debug_printf("  Binname: %s, OEP: %p\n", binary_name, oep);
+	ACTF("  Binname: %s, OEP: %p", binary_name, oep);
 
-	uintptr_t pEntryPoint = oep + base_address;
+	uintptr_t pEntryPoint = (uintptr_t)((UINT64)oep + (UINT64)base_address);
 	if (!pEntryPoint)
 	{
 		dank_perror("GetEntryPoint");
 	}
-	debug_printf("  Entrypoint = %p\n", pEntryPoint);
+	ACTF("  Entrypoint = %p", pEntryPoint);
 
 	// assemble infinite loop at entrypoint
 	DWORD dwOldProtect;
