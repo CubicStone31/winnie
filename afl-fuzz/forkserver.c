@@ -18,6 +18,7 @@
 #include "afl.h"
 #include "process.h"
 #include "forkserver.h"
+#include "stdlib.h"
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "Dbghelp.lib")
@@ -300,80 +301,6 @@ DWORD GetMainThreadId(DWORD pid) {
 	return result;
 }
 
-// starts the forkserver process
-static void start_process(char *cmd) {	
-    HANDLE hJob = NULL;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
-	ACTF("Attach mode enabled, ver 1.2\n");
-    BOOL inherit_handles = FALSE;
-	hJob = CreateJobObject(NULL, NULL);
-    if (hJob == NULL) {
-        FATAL("CreateJobObject failed, GLE=%d.\n", GetLastError());
-    }
-	ZeroMemory(&job_limit, sizeof(job_limit));
-	if (mem_limit || cpu_aff) {
-		if (mem_limit) {
-			job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-			job_limit.ProcessMemoryLimit = (size_t)(mem_limit * 1024 * 1024);
-		}
-
-		if (cpu_aff) {
-			job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_AFFINITY;
-			job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
-		}
-	}
-	//job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
-        FATAL("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
-    }
-
-	DWORD dwFlags = CREATE_SUSPENDED;
-	if (!forkserver_same_console) {
-		dwFlags |= CREATE_NEW_CONSOLE;
-	} else {
-		ACTF("Will use same console for AFL and forkserver.");
-		ACTF("This is not supported via attach mode!");
-	}
-
-	ACTF("Please start the target manaully. cmd: %s", cmd);
-	ACTF("Please input your target pid. pid: ");
-	DWORD pid = 3556;
-	ACTF("Pid received.");
-	child_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
-	if (child_handle == INVALID_HANDLE_VALUE)
-	{
-		dank_perror("Attach mode: OpenProcess");
-	}
-	ACTF("Attach mode: before get main thread.");
-	child_thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, GetMainThreadId(pid));
-	ACTF("Attach mode: main thread ok.");
-	if (child_thread_handle == INVALID_HANDLE_VALUE)
-	{
-		dank_perror("Attach mode: OpenThread");
-	}
-	if (-1 == SuspendThread(child_thread_handle))
-	{
-		dank_perror("Attach mode: SuspendThread");
-	}
-	CONTEXT c;
-	c.ContextFlags = CONTEXT_CONTROL;
-	if (!GetThreadContext(child_thread_handle, &c))
-	{
-		dank_perror("Attach mode: GetThreadContext");
-	}
-	SIZE_T writtenBytes = 0;
-	if (!WriteProcessMemory(child_handle, c.Rip, "\xe9\xbe", 2, &writtenBytes))
-	{
-		dank_perror("Attach mode: WriteProcessMemory");
-	}
-    child_entrypoint_reached = false;
-    if (!AssignProcessToJobObject(hJob, child_handle)) {
-        FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
-    }
-	CloseHandle(hJob);
-	ACTF("Attach mode: step 1 complete.");
-}
-
 void kill_process() {
 	TerminateProcess(child_handle, 0);
 	WaitForSingleObject(child_handle, INFINITE);
@@ -457,31 +384,165 @@ UINT64 GetProcessBaseAddress(HANDLE processHandle)
 			}
 		}
 	}
-
 	return baseAddress;
+}
+
+DWORD FindLaunchedTarget(char* target)
+{
+	;
 }
 
 CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, uint32_t timeout, uint32_t init_timeout)
 {
-	//ACTF("Injecting DLL!");
-	// Spawn the process suspended. We can't inject immediately, however. Need to let the program initialize itself before we can load a library.
-	start_process(cmd);
-	//trace_printf("spwned child\n");
+	if (!strstr(cmd, "Attach:"))
+	{
+		dank_perror("Only allow attach mode!");
+	}
+	char* target = strstr(cmd, "Attach:") + strlen("Attach:");
+	ACTF("Entering attach mode, target %s", target);
+	ACTF("Please launch your target, and then continue.");
+	system("pause");
+
+	// trying to find launched target
+	auto snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	PROCESSENTRY32 entry;
+	entry.dwSize = sizeof(entry);
+	DWORD pid = 0;
+	if (!Process32First(snap, &entry))
+	{
+		dank_perror("Process32FirstW failed.");
+	}
+	if (strstr(entry.szExeFile, target))
+	{
+		pid = entry.th32ProcessID;
+		binary_name = entry.szExeFile;
+		CloseHandle(snap);
+	}
+	else
+	{
+		while (Process32Next(snap, &entry))
+		{
+			if (strstr(entry.szExeFile, target))
+			{
+				pid = entry.th32ProcessID;
+				binary_name = entry.szExeFile;
+				break;
+			}
+		}
+		CloseHandle(snap);
+	}
+	if (pid == 0)
+	{
+		dank_perror("Attach target not found.");
+	}
+	child_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
+	if (child_handle == INVALID_HANDLE_VALUE)
+	{
+		dank_perror("Attach mode: OpenProcess");
+	}
+
+	ACTF("Apply job settings to the process.");
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
+	HANDLE hJob = CreateJobObject(NULL, NULL);
+	if (hJob == NULL) {
+		FATAL("CreateJobObject failed, GLE=%d.\n", GetLastError());
+	}
+	ZeroMemory(&job_limit, sizeof(job_limit));
+	if (mem_limit || cpu_aff) {
+		if (mem_limit) {
+			job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+			job_limit.ProcessMemoryLimit = (size_t)(mem_limit * 1024 * 1024);
+		}
+
+		if (cpu_aff) {
+			job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_AFFINITY;
+			job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
+		}
+	}
+	//job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
+		FATAL("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
+	}
+	if (!AssignProcessToJobObject(hJob, child_handle)) {
+		FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
+	}
+	CloseHandle(hJob);
+
+	child_thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, GetMainThreadId(pid));
+	if (child_thread_handle == INVALID_HANDLE_VALUE)
+	{
+		dank_perror("Attach mode: OpenThread");
+	}
+	if (-1 == SuspendThread(child_thread_handle))
+	{
+		dank_perror("Attach mode: SuspendThread");
+	}
+	// Suspend all threads in target 
+	//{
+	//	int count = 0;
+	//	auto snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	//	THREADENTRY32 tEntry;
+	//	tEntry.dwSize = sizeof(THREADENTRY32);
+	//	for (BOOL success = Thread32First(snap, &tEntry);
+	//		success && GetLastError() != ERROR_NO_MORE_FILES;
+	//		success = Thread32Next(snap, &tEntry))
+	//	{
+	//		if (tEntry.th32OwnerProcessID == pid) {
+	//			auto t = OpenThread(THREAD_ALL_ACCESS, false, tEntry.th32ThreadID);
+	//			if (t == INVALID_HANDLE_VALUE)
+	//			{
+	//				dank_perror("OpenThread failed.");
+	//			}
+	//			if (-1 == SuspendThread(t))
+	//			{
+	//				dank_perror("SuspendThread failed.");
+	//			}
+	//			CloseHandle(t);
+	//			count += 1;
+	//		}
+	//	}
+	//	CloseHandle(snap);
+	//	SAYF("All threads(%d) in the target are suspended.\n", count);
+	//}
+
+
+	CONTEXT c;
+	c.ContextFlags = CONTEXT_CONTROL;
+	if (!GetThreadContext(child_thread_handle, &c))
+	{
+		dank_perror("Attach mode: GetThreadContext");
+	}
+	SAYF("Attached target is now at 0x%p\n", (void*)c.Rip);
+	SIZE_T writtenBytes = 0;
+	const char* originalbytes = "\xe9\x92";
+	DWORD old, tmp;
+	if (!VirtualProtectEx(child_handle, (PVOID)c.Rip, 2, PAGE_EXECUTE_READWRITE, &old))
+	{
+		dank_perror("VirtualProtectEx-1");
+	}
+	if (!WriteProcessMemory(child_handle, c.Rip, originalbytes, 2, &writtenBytes))
+	{
+		dank_perror("WriteProcessMemory");
+	}
+	if (!VirtualProtectEx(child_handle, (PVOID)c.Rip, 2, old, &tmp))
+	{
+		dank_perror("VirtualProtectEx-2");
+	}
+	FlushInstructionCache(child_handle, (PVOID)c.Rip, 2);
+	child_entrypoint_reached = false;
+	SAYF("Target process and thread are successfully opened and suspended.\n");
+
 	// Derive entrypoint address from PEB and PE header
-	CONTEXT context;
 	HMODULE base_address = GetProcessBaseAddress(child_handle);
 	ACTF("  Base address=0x%p", base_address);
-
 	uintptr_t oep = get_entry_point(binary_name);
 	ACTF("  Binname: %s, OEP: %p", binary_name, oep);
-
 	uintptr_t pEntryPoint = (uintptr_t)((UINT64)oep + (UINT64)base_address);
 	if (!pEntryPoint)
 	{
 		dank_perror("GetEntryPoint");
 	}
 	ACTF("  Entrypoint = %p", pEntryPoint);
-
 	// assemble infinite loop at entrypoint
 	DWORD dwOldProtect;
 	VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, PAGE_EXECUTE_READWRITE, &dwOldProtect);
@@ -492,6 +553,9 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	ResumeThread(child_thread_handle);
 
 	// Poll the instruction pointer until it reached the entrypoint, or time out.
+	CONTEXT context;
+	context.ContextFlags = CONTEXT_CONTROL;
+	GetThreadContext(child_thread_handle, &context);
 	for (int i = 0; context.INSTRUCTION_POINTER != pEntryPoint; Sleep(100))
 	{
 		if (++i > 50)
@@ -505,11 +569,8 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	SuspendThread(child_thread_handle);
 
 	// get the name of the pipe/event
-	DWORD pid = GetProcessId(child_handle);
-	debug_printf("  PID is %d\n", pid);
 	afl_pipe = alloc_printf(AFL_FORKSERVER_PIPE "-%d", pid);
-
-	debug_printf("  Pipe name: %s\n", afl_pipe);
+	SAYF("  Pipe name: %s\n", afl_pipe);
 
 	// Actually inject the dll now.
 	char* injectedDll = FORKSERVER_DLL;
@@ -617,7 +678,7 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 
 	// Connect to AFL_FORKSERVER pipe.
 	// Wait for forkserver to setup hooks before we resume the main thread.
-	debug_printf("Connecting to forkserver...\n");
+	ACTF("Connecting to forkserver...");
 	DWORD timeElapsed = 0;
 	do
 	{
@@ -642,11 +703,9 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	{
 		dank_perror("SetNamedPipeHandleState");
 	}
-	debug_printf("Connected to forkserver\n");
-	debug_printf("Ok, the forkserver is ready. Resuming the main thread now.\n");
-
-	debug_printf("Entrypoint: %p | OEP stolen bytes: %02x %02x\n", pEntryPoint, oepBytes[0], oepBytes[1]);
-
+	ACTF("Connected to forkserver.");
+	SAYF("Ok, the forkserver is ready. Resuming the main thread now.\n");
+	SAYF("Entrypoint: %p | OEP stolen bytes: %02x %02x\n", pEntryPoint, oepBytes[0], oepBytes[1]);
 	// a possible problem is if the injected forkserver overwrites pEntryPoint before we restore oepBytes.
 	// to deal with that just check that nothing edited that code before we restore it.
 
@@ -655,7 +714,7 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	VirtualQueryEx(child_handle, (PVOID)pEntryPoint, &memInfo, sizeof(memInfo));
 	if (memInfo.Protect & PAGE_GUARD) {
 		VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, PAGE_EXECUTE_READWRITE, &dwOldProtect);
-		debug_printf("VirtualProtectEx : temporarily removed guard page on entrypoint\n");
+		SAYF("VirtualProtectEx : temporarily removed guard page on entrypoint\n");
 	}
 	WriteProcessMemory(child_handle, (PVOID)pEntryPoint, oepBytes, 2, NULL);
 	FlushInstructionCache(child_handle, (PVOID)pEntryPoint, 2);

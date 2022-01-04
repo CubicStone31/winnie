@@ -872,8 +872,8 @@ __declspec(noreturn) void do_child()
 	setvbuf(fuzzer_stdin, NULL, _IONBF, 0);
 #endif
 
-	//trace_printf("I am the child.\n");
-	//trace_printf("target address = %p\n", target_address);
+	fuzzer_printf("I am the child.\n");
+	fuzzer_printf("target address = %p\n", target_address);
 	SuspendThread(GetCurrentThread()); // wait for parent to unsuspend us when AFL gives the message
 	SetupTarget();
 	call_target(); // does not return
@@ -897,9 +897,6 @@ PROCESS_INFORMATION do_fork()
 	if (!SetProcessAffinityMask(GetCurrentProcess(), childCpuAffinityMask)) {
 		FATAL("Failed to set process affinity");
 	}
-
-	// Parent report child's return status
-	debug_printf("Child pid: %d\n", pid);
 
 	return pi;
 }
@@ -992,13 +989,14 @@ _declspec(noreturn) void forkserver()
 		switch (aflRequest.Operation)
 		{
 		case AFL_CREATE_NEW_CHILD: {
-			trace_printf("Fuzzer asked me to create new child\n");
+			fuzzer_printf("Fuzzer asked me to create new child\n");
 			if (childPending)
 			{
 				FATAL("Invalid request; a forked child is already standby for execution");
 			}
 			forkCount++;
 			curChildInfo = do_fork();
+			fuzzer_printf("Forked, pid %d.\n", curChildInfo.dwProcessId);
 			AFL_FORKSERVER_RESULT aflResponse;
 			aflResponse.StatusCode = AFL_CHILD_CREATED;
 			aflResponse.ChildInfo.ProcessId = curChildInfo.dwProcessId;
@@ -1016,7 +1014,7 @@ _declspec(noreturn) void forkserver()
 			{
 				FATAL("Invalid request; no forked child to resume");
 			}
-			trace_printf("Fuzzer asked me to resume the child\n");
+			fuzzer_printf("Fuzzer asked me to resume the child\n");
 			// Wait for the forked child to suspend itself, then we will resume it. (In order to synchronize)
 			while (1) {
 				DWORD exitCode = 0;
@@ -1195,6 +1193,7 @@ extern "C" {
 
 __declspec(noreturn dllexport) void call_target()
 {
+	fuzzer_printf("call target at 0x%p", fuzz_iter_address);
 	savedContext.Rip = (DWORD64)fuzz_iter_address;
 	RtlRestoreContext(&savedContext, NULL);
 	// the return address SHOULD be report_end
@@ -1496,7 +1495,7 @@ DWORD CALLBACK cbThreadStart(LPVOID hModule)
 	DWORD pid = GetCurrentProcessId();
 	fuzzer_printf("Forkserver PID: %d\n", pid);
 	snprintf(afl_pipe, sizeof(afl_pipe), AFL_FORKSERVER_PIPE "-%d", pid);
-	debug_printf("afl_pipe: %s\n", afl_pipe);
+	fuzzer_printf("afl_pipe: %s\n", afl_pipe);
 	
 	SYSTEM_INFO sys_info = { 0 };
 	GetSystemInfo(&sys_info);
