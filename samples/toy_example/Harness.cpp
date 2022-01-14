@@ -27,8 +27,9 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 	{
 	case DLL_PROCESS_ATTACH:
 		hMainModule = GetModuleHandle(NULL);
-		fuzzMe = GetProcAddress(hMainModule, "fuzz_me");
-		printf("fuzz_me at %p\n", fuzzMe);
+		fuzzMe = (LPVOID)((UINT64)0x434A640 + (UINT64)hMainModule);
+		// fuzzMe = (LPVOID)0x434A640;
+		printf("dnf fuzz target at %p\n", fuzzMe);
 		HarnessInfo.target_method = fuzzMe;
 		HarnessInfo.fuzz_iter_func = (void (CALLBACK *)(void)) fuzzMe;
 

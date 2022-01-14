@@ -514,7 +514,7 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	}
 	SAYF("Attached target is now at 0x%p\n", (void*)c.Rip);
 	SIZE_T writtenBytes = 0;
-	const char* originalbytes = "\xe9\x92";
+	const char* originalbytes = "\x48\x83";
 	DWORD old, tmp;
 	if (!VirtualProtectEx(child_handle, (PVOID)c.Rip, 2, PAGE_EXECUTE_READWRITE, &old))
 	{
@@ -535,7 +535,9 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	// Derive entrypoint address from PEB and PE header
 	HMODULE base_address = GetProcessBaseAddress(child_handle);
 	ACTF("  Base address=0x%p", base_address);
-	uintptr_t oep = get_entry_point(binary_name);
+	ACTF("  Try get entrypoint from file %s", binary_name);
+	ACTF("  Warning: using hardcoded entrypoint!");
+	uintptr_t oep = 0x58f0340;
 	ACTF("  Binname: %s, OEP: %p", binary_name, oep);
 	uintptr_t pEntryPoint = (uintptr_t)((UINT64)oep + (UINT64)base_address);
 	if (!pEntryPoint)
@@ -713,7 +715,10 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	MEMORY_BASIC_INFORMATION memInfo;
 	VirtualQueryEx(child_handle, (PVOID)pEntryPoint, &memInfo, sizeof(memInfo));
 	if (memInfo.Protect & PAGE_GUARD) {
-		VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, PAGE_EXECUTE_READWRITE, &dwOldProtect);
+		if (!VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, PAGE_EXECUTE_READWRITE, &dwOldProtect))
+		{
+			dank_perror("removed guard page on entrypoint failed.");
+		}
 		SAYF("VirtualProtectEx : temporarily removed guard page on entrypoint\n");
 	}
 	WriteProcessMemory(child_handle, (PVOID)pEntryPoint, oepBytes, 2, NULL);
