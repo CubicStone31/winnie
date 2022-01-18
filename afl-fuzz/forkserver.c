@@ -259,23 +259,49 @@ static AFL_COVERAGE_INFO* serialize_breakpoints(cov_modules_list module_names, _
 	return out;
 }
 
+void Debug_DumpBPInfo()
+{
+	FILE* f = fopen("bpinfo.txt", "w+");
+	for (struct winafl_breakpoint* current = breakpoints; current; current = current->next)
+	{	
+		fprintf(f, "%s:\t0x%p\n", current->module->module_name, (void*)current->rva);
+	}
+	fclose(f);
+}
+
 static void mark_visited_breakpoint(struct AFL_COVERAGE_PACKET* bp) {
 	debug_printf("Got coverage: %s+%p\n", bp->ModuleName, bp->Rva);
+	int count = 0;
+	bool found = false;
+	static bool dumponce = false;
 	for (struct winafl_breakpoint *current = breakpoints; current; current = current->next) {
-		if (current->rva == bp->Rva && !strcmp(current->module->module_name, bp->ModuleName)) {
-			//trace_printf("marking:%d\n", current->index);
+		count += 1;
+		if (current->rva == bp->Rva && !stricmp(current->module->module_name, bp->ModuleName)) {
 			found_instrumentation = true;
+			found = true;
 			if (!current->visited) {
 				unsigned byte_idx = current->id >> 3;
 				if (byte_idx >= MAP_SIZE)
 					FATAL("Overflow");
 				trace_bits[byte_idx] |= 1 << (current->id & 0x7);
+				debug_printf("add trace.\n");
 				visited_bbs++;
 				current->visited = true;
 			}
 			break;
 		}
-	}		
+	}
+	if (!found)
+	{
+		debug_printf("no bp info found for coverage 0x%p, after %d interation.\n", bp->Rva, count);
+		if (!dumponce)
+		{
+			debug_printf("dump current bp list.\n");
+			Debug_DumpBPInfo();
+			dumponce = true;
+			debug_printf("done\n");
+		}
+	}
 }
 
 void get_coverage_info(u32 *visited_bbs_out, u32 *total_bbs_out) {
@@ -387,17 +413,17 @@ UINT64 GetProcessBaseAddress(HANDLE processHandle)
 	return baseAddress;
 }
 
-DWORD FindLaunchedTarget(char* target)
-{
-	;
-}
-
 CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, uint32_t timeout, uint32_t init_timeout)
 {
 	if (!strstr(cmd, "Attach:"))
 	{
 		dank_perror("Only allow attach mode!");
 	}
+
+	//ACTF("DUMP BP INFO");
+	//Debug_DumpBPInfo();
+
+
 	char* target = strstr(cmd, "Attach:") + strlen("Attach:");
 	ACTF("Entering attach mode, target %s", target);
 	ACTF("Please launch your target, and then continue.");
@@ -435,6 +461,7 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	{
 		dank_perror("Attach target not found.");
 	}
+	ACTF("Found target, pid %d", pid);
 	child_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
 	if (child_handle == INVALID_HANDLE_VALUE)
 	{
@@ -459,13 +486,13 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 			job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
 		}
 	}
-	//job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-	if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
-		FATAL("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
-	}
-	if (!AssignProcessToJobObject(hJob, child_handle)) {
-		FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
-	}
+	////job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	//if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
+	//	FATAL("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
+	//}
+	//if (!AssignProcessToJobObject(hJob, child_handle)) {
+	//	FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
+	//}
 	CloseHandle(hJob);
 
 	child_thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, GetMainThreadId(pid));
@@ -505,75 +532,12 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	//	SAYF("All threads(%d) in the target are suspended.\n", count);
 	//}
 
-
-	CONTEXT c;
-	c.ContextFlags = CONTEXT_CONTROL;
-	if (!GetThreadContext(child_thread_handle, &c))
-	{
-		dank_perror("Attach mode: GetThreadContext");
-	}
-	SAYF("Attached target is now at 0x%p\n", (void*)c.Rip);
-	SIZE_T writtenBytes = 0;
-	const char* originalbytes = "\x48\x83";
-	DWORD old, tmp;
-	if (!VirtualProtectEx(child_handle, (PVOID)c.Rip, 2, PAGE_EXECUTE_READWRITE, &old))
-	{
-		dank_perror("VirtualProtectEx-1");
-	}
-	if (!WriteProcessMemory(child_handle, c.Rip, originalbytes, 2, &writtenBytes))
-	{
-		dank_perror("WriteProcessMemory");
-	}
-	if (!VirtualProtectEx(child_handle, (PVOID)c.Rip, 2, old, &tmp))
-	{
-		dank_perror("VirtualProtectEx-2");
-	}
-	FlushInstructionCache(child_handle, (PVOID)c.Rip, 2);
-	child_entrypoint_reached = false;
+	child_entrypoint_reached = true;
 	SAYF("Target process and thread are successfully opened and suspended.\n");
-
-	// Derive entrypoint address from PEB and PE header
-	HMODULE base_address = GetProcessBaseAddress(child_handle);
-	ACTF("  Base address=0x%p", base_address);
-	ACTF("  Try get entrypoint from file %s", binary_name);
-	ACTF("  Warning: using hardcoded entrypoint!");
-	uintptr_t oep = 0x58f0340;
-	ACTF("  Binname: %s, OEP: %p", binary_name, oep);
-	uintptr_t pEntryPoint = (uintptr_t)((UINT64)oep + (UINT64)base_address);
-	if (!pEntryPoint)
-	{
-		dank_perror("GetEntryPoint");
-	}
-	ACTF("  Entrypoint = %p", pEntryPoint);
-	// assemble infinite loop at entrypoint
-	DWORD dwOldProtect;
-	VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, PAGE_EXECUTE_READWRITE, &dwOldProtect);
-	BYTE oepBytes[2];
-	ReadProcessMemory(child_handle, (PVOID)pEntryPoint, oepBytes, 2, NULL);
-	WriteProcessMemory(child_handle, (PVOID)pEntryPoint, "\xEB\xFE", 2, NULL);
-	FlushInstructionCache(child_handle, (PVOID)pEntryPoint, 2);
-	ResumeThread(child_thread_handle);
-
-	// Poll the instruction pointer until it reached the entrypoint, or time out.
-	CONTEXT context;
-	context.ContextFlags = CONTEXT_CONTROL;
-	GetThreadContext(child_thread_handle, &context);
-	for (int i = 0; context.INSTRUCTION_POINTER != pEntryPoint; Sleep(100))
-	{
-		if (++i > 50)
-		{
-			FATAL("Entrypoint trap trimed out: the forkserver injection failed, or the target process never reached its entrypoint.\n");
-		}
-		context.ContextFlags = CONTEXT_CONTROL;
-		GetThreadContext(child_thread_handle, &context);
-	}
-	debug_printf("  Entrypoint trap hit, injecting the dll now!\n");
-	SuspendThread(child_thread_handle);
 
 	// get the name of the pipe/event
 	afl_pipe = alloc_printf(AFL_FORKSERVER_PIPE "-%d", pid);
 	SAYF("  Pipe name: %s\n", afl_pipe);
-
 	// Actually inject the dll now.
 	char* injectedDll = FORKSERVER_DLL;
 	char szDllFilename[MAX_PATH];
@@ -597,7 +561,6 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 		FATAL("Failed to parse PE header of %s", injectedDll);
 
 	//options.preload
-	
 	DWORD off_fuzzer_settings = get_proc_offset((char*)lpBase, "fuzzer_settings");
 	DWORD off_forkserver_state = get_proc_offset((char*)lpBase, "forkserver_state");
 	DWORD off_call_target = get_proc_offset((char*)lpBase, "call_target");
@@ -706,26 +669,7 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 		dank_perror("SetNamedPipeHandleState");
 	}
 	ACTF("Connected to forkserver.");
-	SAYF("Ok, the forkserver is ready. Resuming the main thread now.\n");
-	SAYF("Entrypoint: %p | OEP stolen bytes: %02x %02x\n", pEntryPoint, oepBytes[0], oepBytes[1]);
-	// a possible problem is if the injected forkserver overwrites pEntryPoint before we restore oepBytes.
-	// to deal with that just check that nothing edited that code before we restore it.
-
-	// fix guard page issue
-	MEMORY_BASIC_INFORMATION memInfo;
-	VirtualQueryEx(child_handle, (PVOID)pEntryPoint, &memInfo, sizeof(memInfo));
-	if (memInfo.Protect & PAGE_GUARD) {
-		if (!VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, PAGE_EXECUTE_READWRITE, &dwOldProtect))
-		{
-			dank_perror("removed guard page on entrypoint failed.");
-		}
-		SAYF("VirtualProtectEx : temporarily removed guard page on entrypoint\n");
-	}
-	WriteProcessMemory(child_handle, (PVOID)pEntryPoint, oepBytes, 2, NULL);
-	FlushInstructionCache(child_handle, (PVOID)pEntryPoint, 2);
-	DWORD trash;
-	VirtualProtectEx(child_handle, (PVOID)pEntryPoint, 2, dwOldProtect, &trash);
-	
+	SAYF("Ok, the forkserver is ready. Resuming the main thread now.\n");	
 	return (CLIENT_ID){ child_handle, child_thread_handle };
 }
 

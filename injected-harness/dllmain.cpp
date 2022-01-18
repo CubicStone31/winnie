@@ -262,7 +262,12 @@ breakpoint_t RestoreBreakpoint(LPVOID target)
 {
 	breakpoints_mutex.lock();
 	if (breakpoints.find(target) == breakpoints.end())
-		FATAL("RestoreBreakpoint: attempting to restore nonexistent breakpoint");
+	{
+		fuzzer_printf("RestoreBreakpoint: attempting to restore nonexistent breakpoint, at 0x%p", target);
+		breakpoints_mutex.unlock();
+		return {};
+	}
+
 	breakpoint_t breakpoint = breakpoints[target];
 	//trace_printf("The stolen byte was %p\n", stolenByte);
 	breakpoints.erase(target);
@@ -682,10 +687,11 @@ void TerminateProcess_hook(EXCEPTION_POINTERS* ExceptionInfo)
 LONG WINAPI BreakpointHandler(EXCEPTION_POINTERS *ExceptionInfo)
 {
 	//trace_printf("Enter %d\n", handlerReentrancy);
-	if (InterlockedIncrement(&handlerReentrancy) != 1)
-	{
-		FATAL("The breakpoint handler itself generated an exeption (code=%08x, IP=%p) !!! Likely the breakpoint handler is faulty!!", ExceptionInfo->ExceptionRecord->ExceptionCode, ExceptionInfo->ContextRecord->INSTRUCTION_POINTER);
-	}
+	auto tmp = InterlockedIncrement(&handlerReentrancy);
+	//if (tmp != 1)
+	//{
+	//	FATAL("The breakpoint handler itself generated an exeption (code=%08x, IP=%p) !!! Likely the breakpoint handler is faulty!!", ExceptionInfo->ExceptionRecord->ExceptionCode, ExceptionInfo->ContextRecord->INSTRUCTION_POINTER);
+	//}
 	
 	// single step from ntcreatefile hook
 	if (singleStep)
@@ -883,7 +889,9 @@ PROCESS_INFORMATION do_fork()
 {
 	// spawn new child with fork
 	PROCESS_INFORMATION pi;
+	auto before = GetTickCount();
 	DWORD pid = fork(&pi);
+	auto time = GetTickCount() - before;
 	if (pid == -1)
 	{
 		FATAL("fork failed\n");
@@ -892,6 +900,7 @@ PROCESS_INFORMATION do_fork()
 	{
 		do_child(); // does not return
 	}
+	fuzzer_printf("fork time: %d\n", time);
 
 	// VERY IMPORTANT for performance.
 	if (!SetProcessAffinityMask(GetCurrentProcess(), childCpuAffinityMask)) {
@@ -923,7 +932,7 @@ CHILD_FATE do_parent(PROCESS_INFORMATION pi)
 
 			if (msg.StatusCode == CHILD_COVERAGE)
 			{
-				debug_printf("Child has new coverage: %llx\n", msg.CoverageInfo.ip);
+				fuzzer_printf("Child has new coverage: %llx\n", msg.CoverageInfo.ip);
 
 				// remove the breakpoint.
 				breakpoint_t bp = RestoreBreakpoint((LPVOID)msg.CoverageInfo.ip);
@@ -963,7 +972,7 @@ CHILD_FATE do_parent(PROCESS_INFORMATION pi)
 		}
 	}
 
-	debug_printf("Child fate: %d\n", childStatus);
+	fuzzer_printf("Child fate: %d\n", childStatus);
 	return childStatus;
 }
 
@@ -989,14 +998,14 @@ _declspec(noreturn) void forkserver()
 		switch (aflRequest.Operation)
 		{
 		case AFL_CREATE_NEW_CHILD: {
-			fuzzer_printf("Fuzzer asked me to create new child\n");
+			debug_printf("Fuzzer asked me to create new child\n");
 			if (childPending)
 			{
 				FATAL("Invalid request; a forked child is already standby for execution");
 			}
 			forkCount++;
 			curChildInfo = do_fork();
-			fuzzer_printf("Forked, pid %d.\n", curChildInfo.dwProcessId);
+			debug_printf("Forked, pid %d.\n", curChildInfo.dwProcessId);
 			AFL_FORKSERVER_RESULT aflResponse;
 			aflResponse.StatusCode = AFL_CHILD_CREATED;
 			aflResponse.ChildInfo.ProcessId = curChildInfo.dwProcessId;
@@ -1014,7 +1023,7 @@ _declspec(noreturn) void forkserver()
 			{
 				FATAL("Invalid request; no forked child to resume");
 			}
-			fuzzer_printf("Fuzzer asked me to resume the child\n");
+			debug_printf("Fuzzer asked me to resume the child\n");
 			// Wait for the forked child to suspend itself, then we will resume it. (In order to synchronize)
 			while (1) {
 				DWORD exitCode = 0;
@@ -1195,6 +1204,9 @@ __declspec(noreturn dllexport) void call_target()
 {
 	fuzzer_printf("call target at 0x%p", fuzz_iter_address);
 	savedContext.Rip = (DWORD64)fuzz_iter_address;
+
+
+
 	RtlRestoreContext(&savedContext, NULL);
 	// the return address SHOULD be report_end
 }
@@ -1542,34 +1554,34 @@ DWORD CALLBACK cbThreadStart(LPVOID hModule)
 	fuzzer_printf("Target address: 0x%p | Iter address: 0x%p\n", target_address, fuzz_iter_address);
 
     // Network fuzzing mode
-	if (harness_info->network == TRUE) {
-		
-		fuzzer_printf("We will hook network APIs\n");
+	//if (harness_info->network == TRUE) {
+	//	
+	//	fuzzer_printf("We will hook network APIs\n");
 
-		hLibWs2_32 = LoadLibraryA("Ws2_32.dll");
-		if (hLibWs2_32 == NULL) {
-			FATAL("failed to load library, gle = %d\n", GetLastError());				
-		}
+	//	hLibWs2_32 = LoadLibraryA("Ws2_32.dll");
+	//	if (hLibWs2_32 == NULL) {
+	//		FATAL("failed to load library, gle = %d\n", GetLastError());				
+	//	}
 
-		pAccept = (LPVOID)GetProcAddress(hLibWs2_32, "accept");
-		pListen = (LPVOID)GetProcAddress(hLibWs2_32, "listen");
-		pBind   = (LPVOID)GetProcAddress(hLibWs2_32, "bind");
-		pSend   = (LPVOID)GetProcAddress(hLibWs2_32, "send");
-		pRecv   = (LPVOID)GetProcAddress(hLibWs2_32, "recv");
-		pSelect = (LPVOID)GetProcAddress(hLibWs2_32, "select");
-		pIoctlsocket = (LPVOID)GetProcAddress(hLibWs2_32, "ioctlsocket");
-		pSetsockopt  = (LPVOID)GetProcAddress(hLibWs2_32, "setsockopt");
-		
+	//	pAccept = (LPVOID)GetProcAddress(hLibWs2_32, "accept");
+	//	pListen = (LPVOID)GetProcAddress(hLibWs2_32, "listen");
+	//	pBind   = (LPVOID)GetProcAddress(hLibWs2_32, "bind");
+	//	pSend   = (LPVOID)GetProcAddress(hLibWs2_32, "send");
+	//	pRecv   = (LPVOID)GetProcAddress(hLibWs2_32, "recv");
+	//	pSelect = (LPVOID)GetProcAddress(hLibWs2_32, "select");
+	//	pIoctlsocket = (LPVOID)GetProcAddress(hLibWs2_32, "ioctlsocket");
+	//	pSetsockopt  = (LPVOID)GetProcAddress(hLibWs2_32, "setsockopt");
+	//	
 
-		InlineHook(pAccept, MyAccept, (PVOID*)& pOrgAccept, THUNK_SIZE);
-		InlineHook(pListen, MyListen, (PVOID*)& pOrgListen, THUNK_SIZE);
-		InlineHook(pBind,	MyBind,	  (PVOID*)& pOrgBind,	THUNK_SIZE);
-		InlineHook(pSend,	MySend,   (PVOID*)& pOrgSend,	THUNK_SIZE);
-		InlineHook(pRecv,	MyRecv,   (PVOID*)& pOrgRecv,	THUNK_SIZE);			
-		InlineHook(pSetsockopt,  MySetsockopt,  (PVOID*)& pOrgSetsockopt,  THUNK_SIZE);
-		InlineHook(pIoctlsocket, MyIoctlsocket, (PVOID*)& pOrgIoctlsocket, THUNK_SIZE);
-		InlineHook(pSelect, MySelect, (PVOID*)& pOrgSelect, THUNK_SIZE);
-	}
+	//	InlineHook(pAccept, MyAccept, (PVOID*)& pOrgAccept, THUNK_SIZE);
+	//	InlineHook(pListen, MyListen, (PVOID*)& pOrgListen, THUNK_SIZE);
+	//	InlineHook(pBind,	MyBind,	  (PVOID*)& pOrgBind,	THUNK_SIZE);
+	//	InlineHook(pSend,	MySend,   (PVOID*)& pOrgSend,	THUNK_SIZE);
+	//	InlineHook(pRecv,	MyRecv,   (PVOID*)& pOrgRecv,	THUNK_SIZE);			
+	//	InlineHook(pSetsockopt,  MySetsockopt,  (PVOID*)& pOrgSetsockopt,  THUNK_SIZE);
+	//	InlineHook(pIoctlsocket, MyIoctlsocket, (PVOID*)& pOrgIoctlsocket, THUNK_SIZE);
+	//	InlineHook(pSelect, MySelect, (PVOID*)& pOrgSelect, THUNK_SIZE);
+	//}
 
 	// Hook the target address via guard page
 	MEMORY_BASIC_INFORMATION targetPageInfo;
@@ -1608,6 +1620,8 @@ DWORD CALLBACK cbThreadStart(LPVOID hModule)
 	{
 		FATAL("ConnectNamedPipe");
 	}
+
+	fuzzer_printf("connected.\n");
 
 	return 0;
 }

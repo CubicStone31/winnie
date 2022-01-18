@@ -8,8 +8,6 @@ extern savedContext:QWORD
 .code
 
 FuzzingHarness PROC
-	add rsp, 8      ; discard return address
-	push qword ptr [report_end] ; new retaddr
 
     push rcx                            ; preserve rcx
     lea rcx, qword ptr [savedContext]

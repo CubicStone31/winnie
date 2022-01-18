@@ -7074,6 +7074,11 @@ int getopt(int argc, char **argv, char *optstring) {
 
 /* Main entry point */
 int main(int argc, char** argv) {
+
+#ifdef _DEBUG
+    system("pause");
+#endif // DEBUG
+
   s32 opt;
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0, seek_to;

@@ -35,10 +35,10 @@ __declspec(noinline) void __stdcall fuzz_me(char* filename)
 
     check_fwrite();
 
-    TerminateProcess(INVALID_HANDLE_VALUE, 0); // Won't do anything
-    printf("Bye");
-    TerminateProcess(GetCurrentProcess(), 0); // Should get reported as exit
-    printf("We should never get here");
+    //TerminateProcess(INVALID_HANDLE_VALUE, 0); // Won't do anything
+    //printf("Bye");
+    //TerminateProcess(GetCurrentProcess(), 0); // Should get reported as exit
+    //printf("We should never get here");
 }
 
 int main(int argc, char ** argv)
@@ -54,7 +54,12 @@ int main(int argc, char ** argv)
 
     //_getch();
 
-    fuzz_me(argv[1]);
+    while (true)
+    {
+        Sleep(1000);
+        fuzz_me(argv[1]);
+    }
+
 
     printf("main() ends\n");
 
