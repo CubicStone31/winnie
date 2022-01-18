@@ -273,7 +273,6 @@ static void mark_visited_breakpoint(struct AFL_COVERAGE_PACKET* bp) {
 	debug_printf("Got coverage: %s+%p\n", bp->ModuleName, bp->Rva);
 	int count = 0;
 	bool found = false;
-	static bool dumponce = false;
 	for (struct winafl_breakpoint *current = breakpoints; current; current = current->next) {
 		count += 1;
 		if (current->rva == bp->Rva && !stricmp(current->module->module_name, bp->ModuleName)) {
@@ -289,17 +288,6 @@ static void mark_visited_breakpoint(struct AFL_COVERAGE_PACKET* bp) {
 				current->visited = true;
 			}
 			break;
-		}
-	}
-	if (!found)
-	{
-		debug_printf("no bp info found for coverage 0x%p, after %d interation.\n", bp->Rva, count);
-		if (!dumponce)
-		{
-			debug_printf("dump current bp list.\n");
-			Debug_DumpBPInfo();
-			dumponce = true;
-			debug_printf("done\n");
 		}
 	}
 }
@@ -486,12 +474,12 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 			job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
 		}
 	}
-	////job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	//job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 	//if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
-	//	FATAL("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
+	//	SAYF("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
 	//}
 	//if (!AssignProcessToJobObject(hJob, child_handle)) {
-	//	FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
+	//	SAYF("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
 	//}
 	CloseHandle(hJob);
 
@@ -504,34 +492,6 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	{
 		dank_perror("Attach mode: SuspendThread");
 	}
-	// Suspend all threads in target 
-	//{
-	//	int count = 0;
-	//	auto snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-	//	THREADENTRY32 tEntry;
-	//	tEntry.dwSize = sizeof(THREADENTRY32);
-	//	for (BOOL success = Thread32First(snap, &tEntry);
-	//		success && GetLastError() != ERROR_NO_MORE_FILES;
-	//		success = Thread32Next(snap, &tEntry))
-	//	{
-	//		if (tEntry.th32OwnerProcessID == pid) {
-	//			auto t = OpenThread(THREAD_ALL_ACCESS, false, tEntry.th32ThreadID);
-	//			if (t == INVALID_HANDLE_VALUE)
-	//			{
-	//				dank_perror("OpenThread failed.");
-	//			}
-	//			if (-1 == SuspendThread(t))
-	//			{
-	//				dank_perror("SuspendThread failed.");
-	//			}
-	//			CloseHandle(t);
-	//			count += 1;
-	//		}
-	//	}
-	//	CloseHandle(snap);
-	//	SAYF("All threads(%d) in the target are suspended.\n", count);
-	//}
-
 	child_entrypoint_reached = true;
 	SAYF("Target process and thread are successfully opened and suspended.\n");
 

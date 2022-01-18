@@ -18,6 +18,7 @@ typedef volatile struct
 	                                   // You might want to use setup_func for doing things like marking all of the handles as inheritable, killing other threads, closing problematic handles, etc.
 	BOOL network;                      // Optional. If true, apply de-socket techniques (redirects Winsock APIs)
 	volatile CHAR ready;               // Required. Set this to true only when all the other struct members are populated and ready.
+	// todo: add a ret-offset-at field
 } HARNESS_INFO, *PHARNESS_INFO;
 
 #define HARNESS_INFO_PROC "HarnessInfo"

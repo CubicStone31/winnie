@@ -1153,6 +1153,46 @@ void SetupServer()
 
 extern "C" _declspec(noreturn) void harness_main()
 {
+	// freeze all other threads
+	{
+		DWORD selfpid = GetCurrentProcessId();
+		DWORD selftid = GetCurrentThreadId();
+		int count = 0;
+		auto snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		THREADENTRY32 tEntry = {};
+		tEntry.dwSize = sizeof(THREADENTRY32);
+		for (BOOL success = Thread32First(snap, &tEntry);
+			success && GetLastError() != ERROR_NO_MORE_FILES;
+			success = Thread32Next(snap, &tEntry))
+		{
+			auto tid = tEntry.th32ThreadID;
+			if (tid == selftid)
+			{
+				continue;
+			}
+			if (tEntry.th32OwnerProcessID == selfpid) {
+	
+				auto t = OpenThread(THREAD_ALL_ACCESS, false, tid);
+				if (t == INVALID_HANDLE_VALUE)
+				{
+					fuzzer_printf("OpenThread failed, id %d\n", tid);
+					continue;
+				}
+				if (-1 == SuspendThread(t))
+				{
+					fuzzer_printf("SuspendThread failed, id %d\n", tid);
+					CloseHandle(t);
+					continue;
+				}
+				CloseHandle(t);
+				count += 1;
+			}
+		}
+		CloseHandle(snap);
+		fuzzer_printf("All threads(%d) in the target are suspended.\n", count);
+	}
+
+
 	fuzzer_printf("Target hook reached!\n");
 	fuzzer_printf("Unhooking early critical functions...\n");
 	InlineUnhook(pNtProtectVirtualMemory, pOrgNtProtectVirtualMemory, THUNK_SIZE);
@@ -1202,6 +1242,9 @@ extern "C" {
 
 __declspec(noreturn dllexport) void call_target()
 {
+	// set ret addr, to report_end
+	*(void**)savedContext.Rsp = (void*)(report_end);
+
 	fuzzer_printf("call target at 0x%p", fuzz_iter_address);
 	savedContext.Rip = (DWORD64)fuzz_iter_address;
 
