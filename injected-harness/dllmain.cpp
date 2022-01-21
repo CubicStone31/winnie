@@ -15,6 +15,7 @@
 #include "../forkserver-proto.h"
 #include "../harness-api.h"
 #include "exports.h"
+#include "fstream"
 
 //#include <winsock2.h>
 //#pragma comment(lib, "Ws2_32.lib")
@@ -167,6 +168,8 @@ HMODULE hLibWs2_32 = NULL;
 // Fork mode only
 char forkserver_child_pipe [MAX_PATH+1];
 DWORD childCpuAffinityMask;
+
+void LastSetup();
 
 const char* get_module_filename(HMODULE hModule)
 {
@@ -859,6 +862,7 @@ BOOL SearchForMinidump(DWORD pid)
 	return FALSE;
 }
 
+
 void SetupTarget()
 {
 	SetupExceptionFilter();
@@ -867,6 +871,9 @@ void SetupTarget()
 	hook_NtCreateFile();	
 	hook_TerminateProcess();
 	hook_RtlExitUserProcess();
+
+	// set return addr and inject input
+	LastSetup();
 }
 
 __declspec(noreturn) void do_child()
@@ -900,6 +907,8 @@ PROCESS_INFORMATION do_fork()
 	{
 		do_child(); // does not return
 	}
+
+	
 	fuzzer_printf("fork time: %d\n", time);
 
 	// VERY IMPORTANT for performance.
@@ -932,7 +941,7 @@ CHILD_FATE do_parent(PROCESS_INFORMATION pi)
 
 			if (msg.StatusCode == CHILD_COVERAGE)
 			{
-				fuzzer_printf("Child has new coverage: %llx\n", msg.CoverageInfo.ip);
+				debug_printf("Child has new coverage: %llx\n", msg.CoverageInfo.ip);
 
 				// remove the breakpoint.
 				breakpoint_t bp = RestoreBreakpoint((LPVOID)msg.CoverageInfo.ip);
@@ -948,11 +957,11 @@ CHILD_FATE do_parent(PROCESS_INFORMATION pi)
 			break;
 		}
 		case WAIT_OBJECT_0 + 1:  // waitHandles[1] = pi.hProcess;
-			debug_printf("Child process died unexpectedly (crash)\n");
+			fuzzer_printf("Child process died unexpectedly (crash)\n");
 			childStatus = CHILD_CRASHED;
 			break;
 		case WAIT_TIMEOUT:
-			debug_printf("Child timed out\n");
+			fuzzer_printf("Child timed out\n");
 			childStatus = CHILD_TIMEOUT;
 			TerminateProcess(pi.hProcess, 1);
 			break;
@@ -972,7 +981,7 @@ CHILD_FATE do_parent(PROCESS_INFORMATION pi)
 		}
 	}
 
-	fuzzer_printf("Child fate: %d\n", childStatus);
+	debug_printf("Child fate: %d\n", childStatus);
 	return childStatus;
 }
 
@@ -1242,67 +1251,172 @@ extern "C" {
 
 __declspec(noreturn dllexport) void call_target()
 {
-	// set ret addr, to report_end
-	*(void**)savedContext.Rsp = (void*)(report_end);
-
+	// call target
 	fuzzer_printf("call target at 0x%p", fuzz_iter_address);
 	savedContext.Rip = (DWORD64)fuzz_iter_address;
-
-
-
 	RtlRestoreContext(&savedContext, NULL);
 	// the return address SHOULD be report_end
 }
 
+void LastSetup()
+{
+	// set ret addr, to report_end
+	// *(void**)(savedContext.Rsp + 0x88f8) = (void*)(report_end);
+	*(void**)(savedContext.Rsp) = (void*)(report_end);
+
+
+	//// capture the normal buffer
+	//if (fuzzer_settings.mode == DRYRUN)
+	//{
+	//	void* buffer = (void*)savedContext.R8;
+	//	if (savedContext.R9 > 0xffffffff)
+	//	{
+	//		FATAL("Original buffer too large.");
+	//	}
+	//	DWORD len = (DWORD)savedContext.R9;
+
+	//	std::ofstream out("captured.bin", std::ios_base::binary);
+	//	if (!out.is_open())
+	//	{
+	//		FATAL("Failed to capture original input - cannnot create file");
+	//	}
+	//	out.write((const char*)buffer, len);
+	//	out.close();
+	//	fuzzer_printf("Capture done.\n");
+	//}
+
+	// inject mutated input 
+	if (fuzzer_settings.mode != DRYRUN)
+	{
+		auto f = CreateFileW(L"out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+		if (f == INVALID_HANDLE_VALUE)
+		{
+			FATAL("Failed to read input - CreateFileW !");
+		}
+		LARGE_INTEGER filesize = {};
+		if (!GetFileSizeEx(f, &filesize))
+		{
+			FATAL("Failed to read input - GetFileSizeEx !");
+		}
+		if (filesize.HighPart != 0)
+		{
+			FATAL("Failed to read input - File too large !");
+		}
+		void* newbuffer = malloc(filesize.LowPart);
+		if (!newbuffer)
+		{
+			FATAL("Failed to inject input - malloc !");
+		}
+		DWORD read = 0;
+		if (!ReadFile(f, newbuffer, filesize.LowPart, &read, 0))
+		{
+			FATAL("Failed to read input - ReadFile!");
+		}
+		if (read != filesize.LowPart)
+		{
+			FATAL("Failed to read input - Insufficient read!");
+		}
+		savedContext.R8 = (UINT64)newbuffer;
+		savedContext.R9 = read;
+		CloseHandle(f);
+	}
+}
+
+
 #else
-uintptr_t savedEsp;
-uint32_t savedregsEsp;
-#define HARNESS_STACK_SIZE 0x40
-__declspec(align(16)) uint8_t harnessStack[HARNESS_STACK_SIZE];
-__declspec(align(64)) BYTE xsaveData[4096];
+// regs are saved in this memory, by pushad, pushf
+// restore to original state by mov esp, regSaveArea; popf; popad
+void* regSaveArea;
+// for convience only
+DWORD savedEsp = 0;
 
 __declspec(noreturn dllexport) void call_target()
 {
 	_asm {
-		// context switch to target.
-		xor eax, eax;
-		not eax;
-		mov edx, eax;
-		lea ecx, [xsaveData];
-		xrstor[ecx];
-		mov esp, [savedregsEsp];
-		popfd;
-		popad;
-		mov esp, [savedEsp];
+		// restore saved context
+		mov esp, regSaveArea
+		popf
+		popad
 
-		// now in target context.
-		call [fuzz_iter_address];
-
-		// ANYTHING we do must be inside a new function as we have no longer have a stack frame.
-		jmp [report_end];
+		// go, return address is prepared before, at LastSetup().
+		jmp fuzz_iter_address;
 	}
 }
 
 __declspec(naked) void FuzzingHarness(void) {
 	_asm {
-		// context switch to harness, first saving the context of target
-		add esp, 4; // discard return address
-		mov[savedEsp], esp;
-		lea esp, [harnessStack + HARNESS_STACK_SIZE];
-		pushad;
-		pushfd;
-		mov[savedregsEsp], esp;
-		mov esp, [savedEsp]; // Stack pivot fucks up GetModuleHandleA ???
-		sub esp, 0x1000; // Let's allocate some space... to just lubricate some things. Makes SetUnhandledExceptionHandler work(?)
-		xor eax, eax;
-		not eax;
-		mov edx, eax;
-		lea ecx, [xsaveData];
-		xsave[ecx];
-		// now we're in the harness context.
+		// save current context, floating regs are ingored.
+		mov savedEsp, esp
+		pushad
+		pushf
+		mov regSaveArea, esp
+
+		// transfer to out function
 		jmp harness_main;
 	}
 }
+
+void LastSetup()
+{
+	// set ret addr, to report_end
+	*(void**)(savedEsp) = (void*)(report_end);
+
+
+	//// capture the normal buffer
+	//if (fuzzer_settings.mode == DRYRUN)
+	//{
+	//	void* buffer = *(void**)((UINT32)savedEsp + 4);
+	//	// this is the largest packet size of kart udp packet.
+	//	DWORD len = (DWORD)0xac0;
+	//	std::ofstream out("captured.bin", std::ios_base::binary);
+	//	if (!out.is_open())
+	//	{
+	//		FATAL("Failed to capture original input - cannnot create file");
+	//	}
+	//	out.write((const char*)buffer, len);
+	//	out.close();
+	//	fuzzer_printf("Capture done.\n");
+	//}
+
+	// inject mutated input 
+	if (fuzzer_settings.mode != DRYRUN)
+	{
+		auto f = CreateFileW(L"Releasephysx27\\out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+		if (f == INVALID_HANDLE_VALUE)
+		{
+			FATAL("Failed to read input - CreateFileW !");
+		}
+		LARGE_INTEGER filesize = {};
+		if (!GetFileSizeEx(f, &filesize))
+		{
+			FATAL("Failed to read input - GetFileSizeEx !");
+		}
+		if (filesize.HighPart != 0)
+		{
+			FATAL("Failed to read input - File too large !");
+		}
+		void* newbuffer = malloc(filesize.LowPart);
+		if (!newbuffer)
+		{
+			FATAL("Failed to inject input - malloc !");
+		}
+		DWORD inputSize = 0;
+		if (!ReadFile(f, newbuffer, filesize.LowPart, &inputSize, 0))
+		{
+			FATAL("Failed to read input - ReadFile!");
+		}
+		if (inputSize != filesize.LowPart)
+		{
+			FATAL("Failed to read input - Insufficient read!");
+		}
+		
+
+		*(void**)((UINT32)savedEsp + 4) = newbuffer;
+
+		CloseHandle(f);
+	}
+}
+
 #endif
 
 static SYSTEM_INFO systemInfo;
@@ -1367,7 +1481,7 @@ LONG WINAPI SuperEarlyExceptionHandler(EXCEPTION_POINTERS* ExceptionInfo)
 		LPVOID ip = (LPVOID)ExceptionInfo->ContextRecord->INSTRUCTION_POINTER;
 		if (ip == target_address)
 		{
-			debug_printf("Reached our target address breakpoint\n");
+			fuzzer_printf("Reached our target address breakpoint\n");
 			// restore the breakpoint
 			PatchCode(target_address, targetStolenBytes, 1, NULL);
 			// insert trampoline
@@ -1509,7 +1623,13 @@ int __stdcall MySelect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 DWORD CALLBACK cbThreadStart(LPVOID hModule)
 {
 	// Create a console for printf
-	AllocConsole();
+	if (!GetConsoleWindow())
+	{
+		AllocConsole();
+		SetConsoleTitleA("Fuzz");
+	}
+	ShowWindow(GetConsoleWindow(), SW_SHOW);
+
 	fuzzer_stdout = fopen("CONOUT$", "w+");
 	fuzzer_stdin = fopen("CONIN$", "r");
 	setvbuf(fuzzer_stdout, NULL, _IONBF, 0);
