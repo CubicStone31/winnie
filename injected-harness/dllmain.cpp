@@ -390,7 +390,8 @@ __declspec(noreturn) void suicide()
 		debug_printf("do restore\n");
 		RestoreBreakpoint(pTerminateProcess);
 	}
-	debug_printf("bye!\n");
+	fuzzer_printf("bye! If getting stuck here, kill this process %d\n", GetCurrentProcessId());
+	system("pause");
 	TerminateProcess(GetCurrentProcess(), 0);
 }
 
@@ -529,6 +530,9 @@ __declspec(noreturn) void afl_report_end()
 	}
 	//trace_printf("Okay, goodbye.\n");
 	//getc(fuzzer_stdin);
+
+	fuzzer_printf("dry run mode reached fucntion end, exiting now...");
+	system("pause");
 	bye();
 }
 
@@ -879,26 +883,25 @@ void SetupTarget()
 __declspec(noreturn) void do_child()
 {
 #ifdef _DEBUG
-	fuzzer_stdout = fopen("CONOUT$", "w+");
-	fuzzer_stdin = fopen("CONIN$", "r");
-	setvbuf(fuzzer_stdout, NULL, _IONBF, 0);
-	setvbuf(fuzzer_stdin, NULL, _IONBF, 0);
-#endif
-
+	//fuzzer_stdout = fopen("CONOUT$", "w+");
+	//fuzzer_stdin = fopen("CONIN$", "r");
+	//setvbuf(fuzzer_stdout, NULL, _IONBF, 0);
+	//setvbuf(fuzzer_stdin, NULL, _IONBF, 0);
 	fuzzer_printf("I am the child.\n");
 	fuzzer_printf("target address = %p\n", target_address);
+#endif
 	SuspendThread(GetCurrentThread()); // wait for parent to unsuspend us when AFL gives the message
 	SetupTarget();
 	call_target(); // does not return
 }
 
-PROCESS_INFORMATION do_fork()
+PROCESS_INFORMATION do_fork(DWORD& time)
 {
 	// spawn new child with fork
 	PROCESS_INFORMATION pi;
 	auto before = GetTickCount();
 	DWORD pid = fork(&pi);
-	auto time = GetTickCount() - before;
+	time = GetTickCount() - before;
 	if (pid == -1)
 	{
 		FATAL("fork failed\n");
@@ -908,12 +911,9 @@ PROCESS_INFORMATION do_fork()
 		do_child(); // does not return
 	}
 
-	
-	fuzzer_printf("fork time: %d\n", time);
-
 	// VERY IMPORTANT for performance.
 	if (!SetProcessAffinityMask(GetCurrentProcess(), childCpuAffinityMask)) {
-		FATAL("Failed to set process affinity");
+		fuzzer_printf("Failed to set process affinity - may be critical\n");
 	}
 
 	return pi;
@@ -961,7 +961,7 @@ CHILD_FATE do_parent(PROCESS_INFORMATION pi)
 			childStatus = CHILD_CRASHED;
 			break;
 		case WAIT_TIMEOUT:
-			fuzzer_printf("Child timed out\n");
+			fuzzer_printf("Child timed out, timeout is set to %d.\n", fuzzer_settings.timeout);
 			childStatus = CHILD_TIMEOUT;
 			TerminateProcess(pi.hProcess, 1);
 			break;
@@ -1007,14 +1007,14 @@ _declspec(noreturn) void forkserver()
 		switch (aflRequest.Operation)
 		{
 		case AFL_CREATE_NEW_CHILD: {
-			debug_printf("Fuzzer asked me to create new child\n");
 			if (childPending)
 			{
 				FATAL("Invalid request; a forked child is already standby for execution");
 			}
 			forkCount++;
-			curChildInfo = do_fork();
-			debug_printf("Forked, pid %d.\n", curChildInfo.dwProcessId);
+			DWORD forktime = 0;
+			curChildInfo = do_fork(forktime);
+			fuzzer_printf("Forked, pid %d, fork time %d\n", curChildInfo.dwProcessId, forktime);
 			AFL_FORKSERVER_RESULT aflResponse;
 			aflResponse.StatusCode = AFL_CHILD_CREATED;
 			aflResponse.ChildInfo.ProcessId = curChildInfo.dwProcessId;
@@ -1032,7 +1032,10 @@ _declspec(noreturn) void forkserver()
 			{
 				FATAL("Invalid request; no forked child to resume");
 			}
-			debug_printf("Fuzzer asked me to resume the child\n");
+#ifdef _DEBUG
+			fuzzer_printf("Fuzzer asked me to resume the child\n");
+			// system("pause");
+#endif
 			// Wait for the forked child to suspend itself, then we will resume it. (In order to synchronize)
 			while (1) {
 				DWORD exitCode = 0;
@@ -1162,6 +1165,10 @@ void SetupServer()
 
 extern "C" _declspec(noreturn) void harness_main()
 {
+#ifdef  _DEBUG
+	fuzzer_printf("attach now...\n");
+	system("pause");
+#endif //  _DEBUG
 	// freeze all other threads
 	{
 		DWORD selfpid = GetCurrentProcessId();
@@ -1198,7 +1205,7 @@ extern "C" _declspec(noreturn) void harness_main()
 			}
 		}
 		CloseHandle(snap);
-		fuzzer_printf("All threads(%d) in the target are suspended.\n", count);
+		fuzzer_printf("All threads except current one (%d) are suspended, the reporting thread is %d\n", count, selftid);
 	}
 
 
@@ -1286,8 +1293,7 @@ void LastSetup()
 	//}
 
 	// inject mutated input 
-	if (fuzzer_settings.mode != DRYRUN)
-	{
+
 		auto f = CreateFileW(L"out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
 		if (f == INVALID_HANDLE_VALUE)
 		{
@@ -1319,7 +1325,7 @@ void LastSetup()
 		savedContext.R8 = (UINT64)newbuffer;
 		savedContext.R9 = read;
 		CloseHandle(f);
-	}
+	
 }
 
 
@@ -1351,7 +1357,9 @@ __declspec(naked) void FuzzingHarness(void) {
 		pushf
 		mov regSaveArea, esp
 
-		// transfer to out function
+		// transfer to our function
+		sub esp, 0x100
+		and esp, 0xfffffff0
 		jmp harness_main;
 	}
 }
@@ -1379,42 +1387,41 @@ void LastSetup()
 	//}
 
 	// inject mutated input 
-	if (fuzzer_settings.mode != DRYRUN)
+
+	auto f = CreateFileW(L"Releasephysx27\\out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	if (f == INVALID_HANDLE_VALUE)
 	{
-		auto f = CreateFileW(L"Releasephysx27\\out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-		if (f == INVALID_HANDLE_VALUE)
-		{
-			FATAL("Failed to read input - CreateFileW !");
-		}
-		LARGE_INTEGER filesize = {};
-		if (!GetFileSizeEx(f, &filesize))
-		{
-			FATAL("Failed to read input - GetFileSizeEx !");
-		}
-		if (filesize.HighPart != 0)
-		{
-			FATAL("Failed to read input - File too large !");
-		}
-		void* newbuffer = malloc(filesize.LowPart);
-		if (!newbuffer)
-		{
-			FATAL("Failed to inject input - malloc !");
-		}
-		DWORD inputSize = 0;
-		if (!ReadFile(f, newbuffer, filesize.LowPart, &inputSize, 0))
-		{
-			FATAL("Failed to read input - ReadFile!");
-		}
-		if (inputSize != filesize.LowPart)
-		{
-			FATAL("Failed to read input - Insufficient read!");
-		}
+		FATAL("Failed to read input - CreateFileW !");
+	}
+	LARGE_INTEGER filesize = {};
+	if (!GetFileSizeEx(f, &filesize))
+	{
+		FATAL("Failed to read input - GetFileSizeEx !");
+	}
+	if (filesize.HighPart != 0)
+	{
+		FATAL("Failed to read input - File too large !");
+	}
+	void* newbuffer = malloc(filesize.LowPart);
+	if (!newbuffer)
+	{
+		FATAL("Failed to inject input - malloc !");
+	}
+	DWORD inputSize = 0;
+	if (!ReadFile(f, newbuffer, filesize.LowPart, &inputSize, 0))
+	{
+		FATAL("Failed to read input - ReadFile!");
+	}
+	if (inputSize != filesize.LowPart)
+	{
+		FATAL("Failed to read input - Insufficient read!");
+	}
 		
 
-		*(void**)((UINT32)savedEsp + 4) = newbuffer;
+	*(void**)((UINT32)savedEsp + 4) = newbuffer;
 
-		CloseHandle(f);
-	}
+	CloseHandle(f);
+	
 }
 
 #endif
@@ -1522,7 +1529,7 @@ NTSTATUS __stdcall MyNtProtectVirtualMemory(
 	IN ULONG NewAccessProtection,
 	OUT PULONG OldAccessProtection
 ) {
-	debug_printf("Intercepted call to NtProtectVirtualMemory(%p, %p, %08x, %08x, %p)\n", ProcessHandle, BaseAddress, *NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
+	// debug_printf("Intercepted call to NtProtectVirtualMemory(%p, %p, %08x, %08x, %p)\n", ProcessHandle, BaseAddress, *NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
 
 	NTSTATUS ret = pOrgNtProtectVirtualMemory(ProcessHandle, BaseAddress, NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
 
@@ -1635,6 +1642,20 @@ DWORD CALLBACK cbThreadStart(LPVOID hModule)
 	setvbuf(fuzzer_stdout, NULL, _IONBF, 0);
 	setvbuf(fuzzer_stdin, NULL, _IONBF, 0);
 	SetConsoleTitleA("Winnie -- Forkserver");
+
+	//// fork test
+	//{
+	//	fuzzer_printf("test fork\n");
+	//	DWORD forktime = 0;
+	//	auto pi = do_fork(forktime);
+	//	fuzzer_printf("fork done - time %d\n", forktime);
+	//	system("pause");
+	//}
+
+
+
+
+
 
 	// Wait for the AFL to signal us, to tell us that it finished writing the memory.
 	while (forkserver_state == FORKSERVER_NOT_READY)

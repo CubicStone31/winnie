@@ -416,7 +416,6 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	ACTF("Entering attach mode, target %s", target);
 	ACTF("Please launch your target, and then continue.");
 	system("pause");
-
 	// trying to find launched target
 	auto snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	PROCESSENTRY32 entry;

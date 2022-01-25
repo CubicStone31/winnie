@@ -3,9 +3,11 @@
 #include "stdafx.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <wchar.h>
 
 #include "fork.h"
+
 
 // Uncodumented headers csrss stuff
 #include "csrss.h"
@@ -208,10 +210,6 @@ void ReopenStdioHandles()
 #ifndef _WIN64
 LONG WINAPI DiscardException(EXCEPTION_POINTERS *ExceptionInfo)
 {
-	printf("FORKLIB: Discarding exception %08x to %p, at instruction %08x\n",
-		ExceptionInfo->ExceptionRecord->ExceptionCode,
-		ExceptionInfo->ExceptionRecord->ExceptionAddress,
-		ExceptionInfo->ContextRecord->Eip);
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 #endif
@@ -227,7 +225,8 @@ extern "C" DWORD fork(LPPROCESS_INFORMATION lpProcessInformation) {
 
 #ifndef _WIN64
 	// WTF???? Discard *BIZARRE* segfault in ntdll from read fs:[0x18] that you can ignore???
-	LPTOP_LEVEL_EXCEPTION_FILTER oldFilter = SetUnhandledExceptionFilter(DiscardException);
+	// LPTOP_LEVEL_EXCEPTION_FILTER oldFilter = SetUnhandledExceptionFilter(DiscardException);
+	auto handle = AddVectoredExceptionHandler(TRUE, DiscardException);
 #endif
 
 	// This is the part that actually does the forking. Everything else is just
@@ -244,9 +243,9 @@ extern "C" DWORD fork(LPPROCESS_INFORMATION lpProcessInformation) {
 
 #ifndef _WIN64
 	// Clear the exception handler installed earlier.
-	SetUnhandledExceptionFilter(oldFilter);
+	// SetUnhandledExceptionFilter(oldFilter);
+	RemoveVectoredExceptionHandler(handle);
 #endif
-
 	if (!result)
 	{
 		// Parent process
@@ -254,7 +253,6 @@ extern "C" DWORD fork(LPPROCESS_INFORMATION lpProcessInformation) {
 		printf("FORKLIB: hThread = %p, hProcess = %p\n", hThread, hProcess);
 		printf("FORKLIB: Thread ID = %x\n", GetThreadId(hThread));
 		printf("FORKLIB: Result = %d\n", result);
-
 		// Not needed??
 		if (!NotifyCsrssParent(hProcess, hThread))
 		{
@@ -276,14 +274,24 @@ extern "C" DWORD fork(LPPROCESS_INFORMATION lpProcessInformation) {
 	}
 	else
 	{
+#ifdef _DEBUG
+		// while (true) { ; }
+#endif // _DEBUG
+
 		// Child process
-		FreeConsole();
+		// this may cause problem
+		// FreeConsole();
+
+
+
+
+
 		// Remove these calls to improve performance, at the cost of losing stdio.
 #ifdef _DEBUG
-		AllocConsole();
-		SetStdHandle(STD_INPUT_HANDLE, stdin);
-		SetStdHandle(STD_OUTPUT_HANDLE, stdout);
-		SetStdHandle(STD_ERROR_HANDLE, stderr);
+		//AllocConsole();
+		//SetStdHandle(STD_INPUT_HANDLE, stdin);
+		//SetStdHandle(STD_OUTPUT_HANDLE, stdout);
+		//SetStdHandle(STD_ERROR_HANDLE, stderr);
 #endif
 		printf("I'm the child\n");
 
