@@ -30,13 +30,15 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 		// dnf
 		// fuzzMe = (LPVOID)((UINT64)0x434A640 + (UINT64)hMainModule);
 		// printf("dnf fuzz target at %p\n", fuzzMe);
-
-		// kart
-		fuzzMe = (LPVOID)((UINT64)0xE72940 + (UINT64)GetModuleHandleW(L"top-kart.dll"));
-		printf("kart fuzz target at %p\n", fuzzMe);
+		//// kart
+		//fuzzMe = (LPVOID)((UINT64)0xE72940 + (UINT64)GetModuleHandleW(L"top-kart.dll"));
+		//printf("kart fuzz target at %p\n", fuzzMe);
+		// 
+		// cf
+		// cf_ch_gamesrv.exe
+		fuzzMe = (LPVOID)((UINT64)0x46D910 + (UINT64)hMainModule);
 		HarnessInfo.target_method = fuzzMe;
 		HarnessInfo.fuzz_iter_func = (void (CALLBACK *)(void)) fuzzMe;
-
 		MemoryBarrier(); // Prevent the compiler from messing things up by reordering.
 		InterlockedExchange8(&HarnessInfo.ready, TRUE); // Signal to forkserver that we're ready to go.
 

@@ -7,9 +7,7 @@
 #include <conio.h>
 #include <psapi.h>
 #include <dbghelp.h>
-
 #include <stdbool.h>
-
 #include "debug.h"
 #include "process.h"
 
@@ -52,44 +50,169 @@ HMODULE FindModule(HANDLE hProcess, const char* szModuleName)
 	return result;
 }
 
+bool SetPrivilege(
+	LPCTSTR lpszPrivilege,  // name of privilege to enable/disable
+	BOOL bEnablePrivilege   // to enable or disable privilege
+)
+{
+	TOKEN_PRIVILEGES tp;
+	LUID luid;
+
+	if (!LookupPrivilegeValue(
+		NULL,            // lookup privilege on local system
+		lpszPrivilege,   // privilege to lookup 
+		&luid))        // receives LUID of privilege
+	{
+		return FALSE;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	if (bEnablePrivilege)
+		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+	else
+		tp.Privileges[0].Attributes = 0;
+
+	// Enable the privilege or disable all privileges.
+	HANDLE token = NULL;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &token))
+	{
+		return false;
+	}
+	if (!AdjustTokenPrivileges(
+		token,
+		FALSE,
+		&tp,
+		sizeof(TOKEN_PRIVILEGES),
+		(PTOKEN_PRIVILEGES)NULL,
+		(PDWORD)NULL))
+	{
+		CloseHandle(token);
+		return FALSE;
+	}
+	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+	{
+		CloseHandle(token);
+		return FALSE;
+	}
+	CloseHandle(token);
+	return TRUE;
+}
+
+struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
+{
+	PVOID Callback;
+};
+// For driver use
+// We assume driver module is always 64bit
+struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION_64
+{
+	UINT64 Callback;
+};
+// Since Windows 10
+// Currently not used, crash on Win10 Wow64
+struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION_EX
+{
+	ULONG Version;
+	ULONG Reserved;
+	PVOID Callback;
+};
+
+#define ProcessInstrumentationCallback 40
+
+NTSTATUS(NTAPI* NtSetInformationProcess)(
+	IN HANDLE               ProcessHandle,
+	IN PROCESS_INFORMATION_CLASS ProcessInformationClass,
+	IN PVOID                ProcessInformation,
+	IN ULONG                ProcessInformationLength);
+
 HMODULE InjectDll(HANDLE hProcess, LPCSTR szDllFilename)
 {
-	LPVOID pMem = VirtualAllocEx(hProcess, NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	if (!pMem)
+	if (false)
 	{
-		dank_perror("VirtualAllocEx");
-		return NULL;
+		LPVOID pMem = VirtualAllocEx(hProcess, NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		if (!pMem)
+		{
+			dank_perror("VirtualAllocEx");
+			return NULL;
+		}
+		//trace_printf("pMem = 0x%p\n", pMem);
+		BOOL bSuccess = WriteProcessMemory(hProcess, pMem, szDllFilename, strlen(szDllFilename) + 1, NULL);
+		if (!bSuccess)
+		{
+			dank_perror("WriteProcessMemory");
+			return NULL;
+		}
+		//trace_printf("Wrote %s\n", szDllFilename);
+		LPTHREAD_START_ROUTINE pLoadLibraryA = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleA("kernel32"), "LoadLibraryA");
+		trace_printf("LoadLibraryA = 0x%p\n", pLoadLibraryA);
+		DWORD dwThreadId;
+		HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, pLoadLibraryA, pMem, 0, &dwThreadId);
+		if (!hThread)
+		{
+			dank_perror("CreateRemoteThread");
+			return NULL;
+		}
+		//trace_printf("Thread created, ID = %d\n", dwThreadId);	
+		if (WaitForSingleObject(hThread, INFINITE) == WAIT_FAILED)
+		{
+			dank_perror("WaitForSingleObject");
+			return NULL;
+		}
+		Sleep(100);
+		//trace_printf("Success\n");
+		CloseHandle(hThread);
 	}
-	//trace_printf("pMem = 0x%p\n", pMem);
 
-	BOOL bSuccess = WriteProcessMemory(hProcess, pMem, szDllFilename, strlen(szDllFilename) + 1, NULL);
-	if (!bSuccess)
+	// using instrument callbcak
+	if (true)
 	{
-		dank_perror("WriteProcessMemory");
-		return NULL;
+		LPVOID pMem = VirtualAllocEx(hProcess, NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		if (!pMem)
+		{
+			dank_perror("VirtualAllocEx");
+			return NULL;
+		}
+		//trace_printf("pMem = 0x%p\n", pMem);
+		BOOL bSuccess = WriteProcessMemory(hProcess, pMem, szDllFilename, strlen(szDllFilename) + 1, NULL);
+		if (!bSuccess)
+		{
+			dank_perror("WriteProcessMemory");
+			return NULL;
+		}
+		LPTHREAD_START_ROUTINE pLoadLibraryA = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleA("kernel32"), "LoadLibraryA");
+		BYTE shellcode[] = { 0x9C, 0x80, 0x3D, 0x6B, 0x00, 0x00, 0x00, 0x00, 0x75, 0x65, 0x50, 0x53, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x55, 0x57, 0x56, 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xF0, 0x0F, 0xC0, 0x05, 0x43, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x75, 0x24, 0x48, 0xB9, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x48, 0xB8, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x83, 0xE4, 0xF0, 0xFF, 0xD0, 0x48, 0x89, 0xEC, 0x5E, 0x5F, 0x5D, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x5B, 0x58, 0x9D, 0x41, 0xFF, 0xE2, 0x00 };	
+		*(__int64*)(&shellcode[0x36]) = (__int64)pMem;
+		*(__int64*)(&shellcode[0x40]) = (__int64)pLoadLibraryA;
+		pMem = VirtualAllocEx(hProcess, 0, sizeof(shellcode), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+		if (!pMem)
+		{
+			dank_perror("VirtualAllocEx shellcode");
+			return NULL;
+		}
+		bSuccess = WriteProcessMemory(hProcess, pMem, shellcode, sizeof(shellcode), NULL);
+		if (!bSuccess)
+		{
+			dank_perror("WriteProcessMemory shellcode");
+			return NULL;
+		}
+		if (!SetPrivilege(L"SeDebugPrivilege", true))
+		{
+		/*	dank_perror("Set SeDebugPrivilege");
+			return NULL;*/
+		}
+		*(void**)&NtSetInformationProcess = GetProcAddress(GetModuleHandleW(L"NTDLL"), "NtSetInformationProcess");
+		struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION info;
+		memset(&info, 0, sizeof(info));
+		info.Callback = pMem;
+		auto ret = NtSetInformationProcess(hProcess, (PROCESS_INFORMATION_CLASS)ProcessInstrumentationCallback, &info, sizeof(info));
+		if (ret != 0)
+		{
+			dank_perror("NtSetInformationProcess");
+			return NULL;
+		}
+		Sleep(1000);
 	}
-	//trace_printf("Wrote %s\n", szDllFilename);
-
-	LPTHREAD_START_ROUTINE pLoadLibraryA = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleA("kernel32"), "LoadLibraryA");
-	trace_printf("LoadLibraryA = 0x%p\n", pLoadLibraryA);
-	DWORD dwThreadId;
-	HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, pLoadLibraryA, pMem, 0, &dwThreadId);
-	if (!hThread)
-	{
-		dank_perror("CreateRemoteThread");
-		return NULL;
-	}
-	//trace_printf("Thread created, ID = %d\n", dwThreadId);	
-
-	if (WaitForSingleObject(hThread, INFINITE) == WAIT_FAILED)
-	{
-		dank_perror("WaitForSingleObject");
-		return NULL;
-	}
-	Sleep(100);
-	//trace_printf("Success\n");
-	CloseHandle(hThread);
-
 	return FindModule(hProcess, szDllFilename);
 }
 
@@ -97,19 +220,22 @@ HMODULE InjectDll(HANDLE hProcess, LPCSTR szDllFilename)
 void *get_entrypoint(HANDLE child_handle, void *base_address) {
     unsigned char headers[4096];
     size_t num_read = 0;
-    if (!ReadProcessMemory(child_handle, base_address, headers, 4096, &num_read) || (num_read != 4096)) {
+    if (!ReadProcessMemory(child_handle, base_address, headers, 4096, &num_read) || (num_read != 4096)) 
+	{
         FATAL("Error reading target memory\n");
     }
 	IMAGE_DOS_HEADER* dos_header = headers;
 	DWORD pe_offset = dos_header->e_lfanew;
     IMAGE_NT_HEADERS* nt_header = headers + pe_offset;
 	DWORD signature = nt_header->Signature;
-    if (signature != IMAGE_NT_SIGNATURE) {
+    if (signature != IMAGE_NT_SIGNATURE) 
+	{
         FATAL("PE signature error\n");
     }
 	IMAGE_OPTIONAL_HEADER* optional_header = &nt_header->OptionalHeader;
 	WORD magic = optional_header->Magic;
-    if ((magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) && (magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)) {
+    if ((magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) && (magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)) 
+	{
         FATAL("Unknown PE magic value\n");
     } 
 	DWORD entrypoint_offset = optional_header->AddressOfEntryPoint;
@@ -140,7 +266,6 @@ DWORD get_proc_offset(char* data, char *name) {
     DWORD *nameptrtable = (DWORD *)(data + nameptrtableoffset);
     WORD *ordinaltable = (WORD *)(data + ordinaltableoffset);
     DWORD *addresstable = (DWORD *)(data + addresstableoffset);
-
     DWORD i;
     for (i = 0; i < numentries; i++) {
         char *nameptr = data + nameptrtable[i];
@@ -163,16 +288,16 @@ PIMAGE_NT_HEADERS map_pe_file(LPCSTR szPath, LPVOID* lpBase, HANDLE* hMapping, H
 		return NULL;
 	}
 
-	*hMapping = CreateFileMappingA(*hFile, NULL, PAGE_READONLY | SEC_IMAGE_NO_EXECUTE, 0, 0, NULL);
+	*hMapping = CreateFileMappingA(*hFile, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL);
 
 	if (!*hMapping) {
-		FATAL("Cannot make file mapping");
+		FATAL("Cannot make file mapping, error %d", GetLastError());
 		return NULL;
 	}
 	
 	*lpBase = (char *)MapViewOfFile(*hMapping, FILE_MAP_READ, 0, 0, 0);
 	if (!*lpBase) {
-		FATAL("Cannot make MapViewOfFile");
+		FATAL("Cannot make MapViewOfFile, error %d", GetLastError());
 		return NULL;
 	}
 

@@ -401,16 +401,13 @@ UINT64 GetProcessBaseAddress(HANDLE processHandle)
 	return baseAddress;
 }
 
+// my winnie entry here
 CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, uint32_t timeout, uint32_t init_timeout)
 {
 	if (!strstr(cmd, "Attach:"))
 	{
 		dank_perror("Only allow attach mode!");
 	}
-
-	//ACTF("DUMP BP INFO");
-	//Debug_DumpBPInfo();
-
 
 	char* target = strstr(cmd, "Attach:") + strlen("Attach:");
 	ACTF("Entering attach mode, target %s", target);
@@ -449,41 +446,51 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 		dank_perror("Attach target not found.");
 	}
 	ACTF("Found target, pid %d", pid);
+
+	// open target process
 	child_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
-	if (child_handle == INVALID_HANDLE_VALUE)
+	if (!child_handle)
 	{
 		dank_perror("Attach mode: OpenProcess");
 	}
 
-	ACTF("Apply job settings to the process.");
-	JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
-	HANDLE hJob = CreateJobObject(NULL, NULL);
-	if (hJob == NULL) {
-		FATAL("CreateJobObject failed, GLE=%d.\n", GetLastError());
-	}
-	ZeroMemory(&job_limit, sizeof(job_limit));
-	if (mem_limit || cpu_aff) {
-		if (mem_limit) {
-			job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-			job_limit.ProcessMemoryLimit = (size_t)(mem_limit * 1024 * 1024);
+	// job settings. now disabled
+	{
+		ACTF("Apply job settings to the process.");
+		JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
+		HANDLE hJob = CreateJobObject(NULL, NULL);
+		if (hJob == NULL)
+		{
+			FATAL("CreateJobObject failed, GLE=%d.\n", GetLastError());
 		}
+		ZeroMemory(&job_limit, sizeof(job_limit));
+		if (mem_limit || cpu_aff)
+		{
+			if (mem_limit)
+			{
+				job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+				job_limit.ProcessMemoryLimit = (size_t)(mem_limit * 1024 * 1024);
+			}
 
-		if (cpu_aff) {
-			job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_AFFINITY;
-			job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
+			if (cpu_aff)
+			{
+				job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_AFFINITY;
+				job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
+			}
 		}
+		//job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+		//if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
+		//	SAYF("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
+		//}
+		//if (!AssignProcessToJobObject(hJob, child_handle)) {
+		//	SAYF("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
+		//}
+		CloseHandle(hJob);
 	}
-	//job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-	//if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit))) {
-	//	SAYF("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
-	//}
-	//if (!AssignProcessToJobObject(hJob, child_handle)) {
-	//	SAYF("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
-	//}
-	CloseHandle(hJob);
 
+	// suspend target's main thread
 	child_thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, GetMainThreadId(pid));
-	if (child_thread_handle == INVALID_HANDLE_VALUE)
+	if (!child_thread_handle)
 	{
 		dank_perror("Attach mode: OpenThread");
 	}
@@ -510,7 +517,7 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	{
 		FATAL("InjectDll");
 	}
-	debug_printf("  Forkserver dll injected, base address = %p\n", hModule);
+	SAYF("  Forkserver dll injected, base address = %p\n", hModule);
 
 	// Write coverage info
 	HANDLE hMapping = INVALID_HANDLE_VALUE, hFile = INVALID_HANDLE_VALUE;
@@ -518,22 +525,17 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	PIMAGE_NT_HEADERS ntHeader = map_pe_file(szDllFilename, (LPVOID*)&lpBase, &hMapping, &hFile);
 	if (!ntHeader)
 		FATAL("Failed to parse PE header of %s", injectedDll);
-
-	//options.preload
 	DWORD off_fuzzer_settings = get_proc_offset((char*)lpBase, "fuzzer_settings");
 	DWORD off_forkserver_state = get_proc_offset((char*)lpBase, "forkserver_state");
 	DWORD off_call_target = get_proc_offset((char*)lpBase, "call_target");
-
 	if (!off_fuzzer_settings || !off_call_target)
 		FATAL("Fail to locate forkserver exports!\n");
-	debug_printf("  fuzzer_settings offset = %08x, call_target offset = %08x\n", off_fuzzer_settings, off_call_target);
-
+	SAYF("  fuzzer_settings offset = %08x, off_forkserver_state = %08x, call_target offset = %08x\n", off_fuzzer_settings, off_forkserver_state, off_call_target);
 	size_t nWritten;
 	pFuzzer_settings = (LPVOID)((uintptr_t)hModule + off_fuzzer_settings);
 	pForkserver_state = (LPVOID)((uintptr_t)hModule + off_forkserver_state);
 	pCall_offset = (LPVOID)((uintptr_t)hModule + off_call_target);
-	debug_printf("  fuzzer_settings = %p, forkserver_state = %p, call target = %p\n", pFuzzer_settings, pForkserver_state, pCall_offset);
-
+	SAYF("  fuzzer_settings = %p, forkserver_state = %p, call target = %p\n", pFuzzer_settings, pForkserver_state, pCall_offset);
 	LPVOID pCovInfo;
 	if (use_fullspeed) // Fullspeed mode
 	{
@@ -574,7 +576,6 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	{
 		FATAL("Unsupported coverage mode");
 	}
-
 	AFL_SETTINGS fuzzer_settings;
 	strncpy(fuzzer_settings.harness_name, options.fuzz_harness, sizeof(fuzzer_settings.harness_name));
 	strncpy(fuzzer_settings.minidump_path, options.minidump_path, sizeof(fuzzer_settings.minidump_path));
@@ -587,12 +588,10 @@ CLIENT_ID spawn_child_with_injection(char* cmd, INJECTION_MODE injection_type, u
 	if (!WriteProcessMemory(child_handle, pFuzzer_settings, &fuzzer_settings, sizeof(AFL_SETTINGS), &nWritten) || nWritten < sizeof(AFL_SETTINGS))
 	{
 		dank_perror("Writing fuzzer settings into child");
-	}
-	
+	}	
 	if (lpBase) UnmapViewOfFile((LPCVOID)lpBase);
 	if (hMapping != INVALID_HANDLE_VALUE) CloseHandle(hMapping);
 	if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-
 	// Signal to forkserver that coverage info is written
 	FORKSERVER_STATE ready = FORKSERVER_READY;
 	if (!WriteProcessMemory(child_handle, pForkserver_state, &ready, sizeof(FORKSERVER_STATE), &nWritten) || nWritten < sizeof(FORKSERVER_STATE))

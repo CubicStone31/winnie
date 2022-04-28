@@ -16,6 +16,7 @@
 #include "../harness-api.h"
 #include "exports.h"
 #include "fstream"
+#include <windows.h>
 
 //#include <winsock2.h>
 //#pragma comment(lib, "Ws2_32.lib")
@@ -25,7 +26,21 @@ __declspec(noreturn) void suicide();
 
 FILE*fuzzer_stdout, *fuzzer_stdin;
 
-#define fuzzer_printf(...) fprintf(fuzzer_stdout, ##__VA_ARGS__##);
+void OutputFmtDbgStringA(const char* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	int len = _vscprintf(fmt, args) + 1;
+	char* lpszBuf = (char*)malloc(len * sizeof(char));
+	vsprintf_s(lpszBuf, len, fmt, args);
+	va_end(args);
+	OutputDebugStringA(lpszBuf);
+	free(lpszBuf);
+}
+//#define fuzzer_printf(...) { fprintf(fuzzer_stdout, ##__VA_ARGS__##); }
+#define fuzzer_printf(...) { OutputFmtDbgStringA(##__VA_ARGS__##);}
+
+
 
 // Print if debug enabled
 #define debug_printf(...) {if (fuzzer_settings.debug) fprintf(fuzzer_stdout, ##__VA_ARGS__##); }
@@ -37,7 +52,9 @@ FILE*fuzzer_stdout, *fuzzer_stdin;
 #define trace_printf(fmt, ...) fprintf(fuzzer_stdout, "TRACE: " fmt, ##__VA_ARGS__##)
 #endif
 
-#define FATAL(f, ...) {fprintf(fuzzer_stdout, f ": %d\n", ##__VA_ARGS__##, GetLastError()); fprintf(fuzzer_stdout, "Press enter to exit\n"); fflush(fuzzer_stdout); (void)getc(fuzzer_stdin); suicide(); }
+//#define FATAL(f, ...) {fprintf(fuzzer_stdout, f ": %d\n", ##__VA_ARGS__##, GetLastError()); fprintf(fuzzer_stdout, "Press enter to exit\n"); fflush(fuzzer_stdout); (void)getc(fuzzer_stdin); suicide(); }
+#define FATAL(...) { fuzzer_printf(##__VA_ARGS__##); suicide(); }
+
 
 #ifdef _WIN64
 #define INSTRUCTION_POINTER Rip
@@ -519,8 +536,7 @@ extern "C" {
 
 __declspec(noreturn) void afl_report_end()
 {
-	//trace_printf("ipc to the forkserver to tell them we finished\n");
-	// ipc to the forkserver to tell him we finished.
+	fuzzer_printf("dry run mode reached fucntion end, good...\n");
 	AFL_FORKSERVER_RESULT aflResponse;
 	aflResponse.StatusCode = AFL_CHILD_SUCCESS;
 	DWORD nWritten;
@@ -528,11 +544,6 @@ __declspec(noreturn) void afl_report_end()
 	{
 		FATAL("Broken AFL pipe, WriteFile (report_end)");
 	}
-	//trace_printf("Okay, goodbye.\n");
-	//getc(fuzzer_stdin);
-
-	fuzzer_printf("dry run mode reached fucntion end, exiting now...");
-	system("pause");
 	bye();
 }
 
@@ -1208,22 +1219,18 @@ extern "C" _declspec(noreturn) void harness_main()
 		fuzzer_printf("All threads except current one (%d) are suspended, the reporting thread is %d\n", count, selftid);
 	}
 
-
 	fuzzer_printf("Target hook reached!\n");
 	fuzzer_printf("Unhooking early critical functions...\n");
 	InlineUnhook(pNtProtectVirtualMemory, pOrgNtProtectVirtualMemory, THUNK_SIZE);
 	InlineUnhook(pRtlAddVectoredExceptionHandler, pOrgRtlAddVectoredExceptionHandler, THUNK_SIZE);
 	fuzzer_printf("-> OK!\n");
-
 	// Setup a temporary handler because a breakpoint might get tripped while we are setting up!!!
 	RemoveVectoredExceptionHandler(superEarlyHandler);
 	superEarlyHandler = INVALID_HANDLE_VALUE;
 	earlyHandler = AddVectoredExceptionHandler(TRUE, EarlyExceptionHandler);
-
 	install_breakpoints();
 	// Restore target hook stolen bytes
 	PatchCode(target_address, targetStolenBytes, TRAMPOLINE_SIZE, NULL);
-
 	SetupServer();
 	
 	if (harness_info->setup_func) {
@@ -1272,59 +1279,59 @@ void LastSetup()
 	*(void**)(savedContext.Rsp) = (void*)(report_end);
 
 
-	//// capture the normal buffer
-	//if (fuzzer_settings.mode == DRYRUN)
-	//{
-	//	void* buffer = (void*)savedContext.R8;
-	//	if (savedContext.R9 > 0xffffffff)
-	//	{
-	//		FATAL("Original buffer too large.");
-	//	}
-	//	DWORD len = (DWORD)savedContext.R9;
-
-	//	std::ofstream out("captured.bin", std::ios_base::binary);
-	//	if (!out.is_open())
-	//	{
-	//		FATAL("Failed to capture original input - cannnot create file");
-	//	}
-	//	out.write((const char*)buffer, len);
-	//	out.close();
-	//	fuzzer_printf("Capture done.\n");
-	//}
+	// capture the normal buffer
+	if (fuzzer_settings.mode == DRYRUN)
+	{
+		void* buffer = (void*)(savedContext.R9 + 0x34);
+		//if (savedContext.R9 > 0xffffffff)
+		//{
+		//	FATAL("Original buffer too large.");
+		//}
+		DWORD len = (DWORD)100;
+		std::ofstream out("captured.bin", std::ios_base::binary);
+		if (!out.is_open())
+		{
+			FATAL("Failed to capture original input - cannnot create file");
+		}
+		out.write((const char*)buffer, len);
+		out.close();
+		fuzzer_printf("Capture done.\n");
+	}
 
 	// inject mutated input 
 
-		auto f = CreateFileW(L"out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-		if (f == INVALID_HANDLE_VALUE)
-		{
-			FATAL("Failed to read input - CreateFileW !");
-		}
-		LARGE_INTEGER filesize = {};
-		if (!GetFileSizeEx(f, &filesize))
-		{
-			FATAL("Failed to read input - GetFileSizeEx !");
-		}
-		if (filesize.HighPart != 0)
-		{
-			FATAL("Failed to read input - File too large !");
-		}
-		void* newbuffer = malloc(filesize.LowPart);
-		if (!newbuffer)
-		{
-			FATAL("Failed to inject input - malloc !");
-		}
-		DWORD read = 0;
-		if (!ReadFile(f, newbuffer, filesize.LowPart, &read, 0))
-		{
-			FATAL("Failed to read input - ReadFile!");
-		}
-		if (read != filesize.LowPart)
-		{
-			FATAL("Failed to read input - Insufficient read!");
-		}
-		savedContext.R8 = (UINT64)newbuffer;
-		savedContext.R9 = read;
-		CloseHandle(f);
+	auto f = CreateFileW(L"out\\.cur_input", GENERIC_READ, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	if (f == INVALID_HANDLE_VALUE)
+	{
+		FATAL("Failed to read input - CreateFileW !");
+	}
+	LARGE_INTEGER filesize = {};
+	if (!GetFileSizeEx(f, &filesize))
+	{
+		FATAL("Failed to read input - GetFileSizeEx !");
+	}
+	if (filesize.HighPart != 0)
+	{
+		FATAL("Failed to read input - File too large !");
+	}
+	// LastSetup() will be only called in forked process, and be called only once, so mem leak here won't make too much trouble.
+	void* newbuffer = malloc(filesize.LowPart + 0x34);
+	if (!newbuffer)
+	{
+		FATAL("Failed to inject input - malloc !");
+	}
+	memcpy(newbuffer, (const void*)(savedContext.R9), 0x34);
+	DWORD read = 0;
+	if (!ReadFile(f, (char*)newbuffer+0x34, filesize.LowPart, &read, 0))
+	{
+		FATAL("Failed to read input - ReadFile!");
+	}
+	if (read != filesize.LowPart)
+	{
+		FATAL("Failed to read input - Insufficient read!");
+	}
+	savedContext.R9 = (UINT64)newbuffer;
+	CloseHandle(f);
 	
 }
 
@@ -1629,37 +1636,11 @@ int __stdcall MySelect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 
 DWORD CALLBACK cbThreadStart(LPVOID hModule)
 {
-	// Create a console for printf
-	if (!GetConsoleWindow())
-	{
-		AllocConsole();
-		SetConsoleTitleA("Fuzz");
-	}
-	ShowWindow(GetConsoleWindow(), SW_SHOW);
-
-	fuzzer_stdout = fopen("CONOUT$", "w+");
-	fuzzer_stdin = fopen("CONIN$", "r");
-	setvbuf(fuzzer_stdout, NULL, _IONBF, 0);
-	setvbuf(fuzzer_stdin, NULL, _IONBF, 0);
-	SetConsoleTitleA("Winnie -- Forkserver");
-
-	//// fork test
-	//{
-	//	fuzzer_printf("test fork\n");
-	//	DWORD forktime = 0;
-	//	auto pi = do_fork(forktime);
-	//	fuzzer_printf("fork done - time %d\n", forktime);
-	//	system("pause");
-	//}
-
-
-
-
-
-
 	// Wait for the AFL to signal us, to tell us that it finished writing the memory.
+	fuzzer_printf("Waiting...\n");
 	while (forkserver_state == FORKSERVER_NOT_READY)
 		Sleep(10);
+	fuzzer_printf("Signal comes\n");
 
 	MemoryBarrier();
 	
@@ -1718,8 +1699,9 @@ DWORD CALLBACK cbThreadStart(LPVOID hModule)
 	hHarness = LoadLibraryA((LPSTR) fuzzer_settings.harness_name);
 	if (!hHarness)
 	{
-		FATAL("Failed to load harness");
+		FATAL("Failed to load harness, last error %d\n", GetLastError());
 	}
+	fuzzer_printf("harness loaded.\n");
 	harness_info = (PHARNESS_INFO) GetProcAddress(hHarness, HARNESS_INFO_PROC);
 	if (!harness_info)
 	{
@@ -1737,76 +1719,36 @@ DWORD CALLBACK cbThreadStart(LPVOID hModule)
 	fuzz_iter_address = harness_info->fuzz_iter_func;
 	fuzzer_printf("Target address: 0x%p | Iter address: 0x%p\n", target_address, fuzz_iter_address);
 
-    // Network fuzzing mode
-	//if (harness_info->network == TRUE) {
-	//	
-	//	fuzzer_printf("We will hook network APIs\n");
-
-	//	hLibWs2_32 = LoadLibraryA("Ws2_32.dll");
-	//	if (hLibWs2_32 == NULL) {
-	//		FATAL("failed to load library, gle = %d\n", GetLastError());				
-	//	}
-
-	//	pAccept = (LPVOID)GetProcAddress(hLibWs2_32, "accept");
-	//	pListen = (LPVOID)GetProcAddress(hLibWs2_32, "listen");
-	//	pBind   = (LPVOID)GetProcAddress(hLibWs2_32, "bind");
-	//	pSend   = (LPVOID)GetProcAddress(hLibWs2_32, "send");
-	//	pRecv   = (LPVOID)GetProcAddress(hLibWs2_32, "recv");
-	//	pSelect = (LPVOID)GetProcAddress(hLibWs2_32, "select");
-	//	pIoctlsocket = (LPVOID)GetProcAddress(hLibWs2_32, "ioctlsocket");
-	//	pSetsockopt  = (LPVOID)GetProcAddress(hLibWs2_32, "setsockopt");
-	//	
-
-	//	InlineHook(pAccept, MyAccept, (PVOID*)& pOrgAccept, THUNK_SIZE);
-	//	InlineHook(pListen, MyListen, (PVOID*)& pOrgListen, THUNK_SIZE);
-	//	InlineHook(pBind,	MyBind,	  (PVOID*)& pOrgBind,	THUNK_SIZE);
-	//	InlineHook(pSend,	MySend,   (PVOID*)& pOrgSend,	THUNK_SIZE);
-	//	InlineHook(pRecv,	MyRecv,   (PVOID*)& pOrgRecv,	THUNK_SIZE);			
-	//	InlineHook(pSetsockopt,  MySetsockopt,  (PVOID*)& pOrgSetsockopt,  THUNK_SIZE);
-	//	InlineHook(pIoctlsocket, MyIoctlsocket, (PVOID*)& pOrgIoctlsocket, THUNK_SIZE);
-	//	InlineHook(pSelect, MySelect, (PVOID*)& pOrgSelect, THUNK_SIZE);
-	//}
-
 	// Hook the target address via guard page
 	MEMORY_BASIC_INFORMATION targetPageInfo;
 	DWORD dwOldProtect;
 	VirtualQuery(target_address, &targetPageInfo, sizeof(targetPageInfo));
 	VirtualProtect(target_address, 1, targetPageInfo.Protect | PAGE_GUARD, &dwOldProtect);
-
 	// get NtCreateFile address
 	pCreateFile = (LPVOID)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtCreateFile");
-
 	// get TerminateProcess address
 	pTerminateProcess = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "TerminateProcess");
 	pRtlExitUserProcess = (LPVOID)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlExitUserProcess");
-
 	pNtProtectVirtualMemory = (LPVOID)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtProtectVirtualMemory");
 	pRtlAddVectoredExceptionHandler = (LPVOID)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlAddVectoredExceptionHandler");
-
 	GetSystemInfo(&systemInfo); // get the page size
 	superEarlyHandler = AddVectoredExceptionHandler(TRUE, SuperEarlyExceptionHandler);
-
 	fuzzer_printf("Early hooking critical functions...\n");
 	InlineHook(pNtProtectVirtualMemory, MyNtProtectVirtualMemory, (PVOID*)& pOrgNtProtectVirtualMemory, THUNK_SIZE);
 	InlineHook(pRtlAddVectoredExceptionHandler, MyRtlAddVectoredExceptionHandler, (PVOID*)& pOrgRtlAddVectoredExceptionHandler, THUNK_SIZE);
 	fuzzer_printf("-> OK!\n");
-
 	hPipeAfl = CreateNamedPipeA(afl_pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
 	if (hPipeAfl == INVALID_HANDLE_VALUE)
 	{
 		FATAL("CreateNamedPipe");
 	}
-
 	fuzzer_printf("Connecting to AFL and returning control to main binary!\n");
 	fflush(fuzzer_stdout);
-
 	if (!ConnectNamedPipe(hPipeAfl, NULL) && GetLastError() != ERROR_PIPE_CONNECTED) // This will block!
 	{
 		FATAL("ConnectNamedPipe");
 	}
-
 	fuzzer_printf("connected.\n");
-
 	return 0;
 }
 
